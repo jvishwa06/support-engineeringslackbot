@@ -1,0 +1,6 @@
+others/
+rocketenv/
+.env
+.DS_Store
+__pycache__/
+service-account.json
