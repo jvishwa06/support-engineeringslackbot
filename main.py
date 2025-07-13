@@ -13,6 +13,7 @@ import pytz
 from ticketstore import get_all_tickets, update_ticket, save_ticket, get_escalation_members
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
+import requests
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,13 +27,70 @@ FRT_THRESHOLDS = {
     "Medium": float(os.getenv("FRT_HOURS_MEDIUM")),  # 3 min
     "Low": float(os.getenv("FRT_HOURS_LOW"))         # 5 min
 }
-FRT_ESCALATION_HOURS = float(os.getenv("FRT_ESCALATION_HOURS", "0.0167"))
+FRT_ESCALATION_HOURS = float(os.getenv("FRT_ESCALATION_HOURS")) #1 min
+
+JIRA_URL = os.getenv("JIRA_URL")
+JIRA_USER = os.getenv("JIRA_USER")
+JIRA_TOKEN = os.getenv("JIRA_TOKEN")
+JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY")
 
 app = FastAPI()
 web_client = WebClient(token=BOT_TOKEN)
 socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+def create_jira_ticket(ticket_id, summary, issue, fix, priority, resolved, triaged_by_name, ticket):
+    if not all([JIRA_URL, JIRA_USER, JIRA_TOKEN, JIRA_PROJECT_KEY]):
+        logging.error("Jira configuration missing.")
+        return None
+    jira_summary = summary
+    due_date = None
+    if resolved:
+        try:
+            dt = parser.parse(resolved)
+            due_date = dt.strftime('%Y-%m-%d')
+        except Exception as e:
+            logging.warning(f"Could not parse due date: {resolved}, error: {e}")
+    assignee = ticket.get('assignee_id', '')
+    jira_description = (
+        f"Ticket Details:\n"
+        f"Issue: {issue}\n"
+        f"How to fix: {fix}\n"
+        f"Client Name: {ticket.get('client_name', '')}\n"
+        f"Client App ID: {ticket.get('client_app_id', '')}\n"
+        f"Product: {ticket.get('product', '')}\n"
+        f"Endpoint: {ticket.get('endpoint', '')}"
+    )
+    payload = {
+        "fields": {
+            "project": {"key": JIRA_PROJECT_KEY},
+            "summary": jira_summary,
+            "description": jira_description,
+            "issuetype": {"name": "Task"},
+            "priority": {"name": priority}
+        }
+    }
+    if assignee:
+        payload["fields"]["assignee"] = {"name": assignee}
+    if due_date:
+        payload["fields"]["duedate"] = due_date
+    try:
+        response = requests.post(
+            f"{JIRA_URL}/rest/api/2/issue",
+            json=payload,
+            auth=(JIRA_USER, JIRA_TOKEN),
+            headers={"Content-Type": "application/json"}
+        )
+        if response.status_code == 201:
+            issue_key = response.json().get("key")
+            logging.info(f"Jira ticket created: {issue_key}")
+            return issue_key
+        else:
+            logging.error(f"Failed to create Jira ticket: {response.text}")
+    except Exception as e:
+        logging.error(f"Error creating Jira ticket: {e}")
+    return None
 
 def get_escalation_members(product):
     if not product:
@@ -49,7 +107,6 @@ def get_escalation_members(product):
     return []
 
 def get_assignee_level(product, assignee_id):
-    """Return the level of the assignee for the product (L1, L2, L3)."""
     try:
         with open("escalationmatrixid.csv", "r") as f:
             reader = csv.reader(f)
@@ -69,7 +126,6 @@ def post_ticket_message(ticket):
         formatted_time = now.strftime("%b %d, %Y, %-I:%M %p")
         blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": (
-                f"*Ticket #{ticket['id']}*\n"
                 f"*Title:* {ticket['title']}\n"
                 f"*Description:* {ticket['description']}\n"
                 f"*Client Name:* {ticket['client_name']}\n"
@@ -149,14 +205,9 @@ def post_ticket_message(ticket):
 def send_fr_reminder(ticket):
     try:
         reminder_text = (
-            f"⏰ FRT Reminder for Ticket #{ticket['id']}\n"
-            f"<@{ticket['assignee_id']}> Please respond!"
+            f"⏰ <@{ticket['assignee_id']}>, please take a look and respond as soon as possible."
         )
-        web_client.chat_postMessage(
-            channel=CHANNEL,
-            thread_ts=ticket['message_ts'],
-            text=reminder_text
-        )
+        web_client.chat_postMessage(channel=CHANNEL,thread_ts=ticket['message_ts'],text=reminder_text)
         logging.info(f"Reminder sent for ticket #{ticket['id']} to <@{ticket['assignee_id']}>.")
     except Exception as e:
         logging.error(f"Error sending FRT reminder: {e}")
@@ -167,14 +218,9 @@ def send_escalation_reminder(ticket):
         if assignee_level and idx is not None and idx+1 < len(levels):
             next_level_id = levels[idx+1]
             reminder_text = (
-                f"🚨 FRT Escalation for Ticket #{ticket['id']}\n"
-                f"<@{next_level_id}> Please look into this ticket. Assignee <@{ticket['assignee_id']}> did not respond in time."
+                f"🚨 <@{next_level_id}>, kindly check this matter. No response received so far."
             )
-            web_client.chat_postMessage(
-                channel=CHANNEL,
-                thread_ts=ticket['message_ts'],
-                text=reminder_text
-            )
+            web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=reminder_text)
             logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to <@{next_level_id}>.")
         else:
             logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
@@ -283,7 +329,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
             "assigned_to": assigned_to_name,
             "assignee_id": assignee_id,
             "frt_hours": "",
-            "message_ts": ""
+            "message_ts": "",
+            "priority": ""
         }
 
         logging.info(f"Saving ticket (pre-post): {ticket}")
@@ -368,11 +415,17 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                 "title": {"type": "plain_text", "text": "Triage Ticket"},
                 "submit": {"type": "plain_text", "text": "Submit"},
                 "blocks": [
+                    {"type": "input", "block_id": "summary", "label": {"type": "plain_text", "text": "Summary"}, "element": {"type": "plain_text_input", "action_id": "value"}},
                     {"type": "input", "block_id": "issue", "label": {"type": "plain_text", "text": "What's the issue"}, "element": {"type": "plain_text_input", "action_id": "value", "multiline": True}},
-                    {"type": "input", "block_id": "fix", "label": {"type": "plain_text", "text": "How to fix"}, "element": {"type": "plain_text_input", "action_id": "value", "multiline": True}},
+                    {"type": "input", "block_id": "fix", "label": {"type": "plain_text", "text": "What's the fix"}, "element": {"type": "plain_text_input", "action_id": "value", "multiline": True}},
+                    {"type": "input", "block_id": "priority", "label": {"type": "plain_text", "text": "Priority"}, "element": {"type": "static_select", "action_id": "value", "options": [
+                        {"text": {"type": "plain_text", "text": "High"}, "value": "High"},
+                        {"text": {"type": "plain_text", "text": "Medium"}, "value": "Medium"},
+                        {"text": {"type": "plain_text", "text": "Low"}, "value": "Low"}
+                    ]}},
                     {"type": "input", "block_id": "resolved_date", "label": {"type": "plain_text", "text": "When resolved (Date)"}, "element": {"type": "datepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select a date"}}},
                     {"type": "input", "block_id": "resolved_time", "label": {"type": "plain_text", "text": "When resolved (Time)"}, "element": {"type": "timepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select time"}}},
-                    {"type": "input", "block_id": "escalate_to", "optional": True, "label": {"type": "plain_text", "text": "Escalate To"}, "element": {"type": "users_select", "action_id": "value"}}
+                    {"type": "input", "block_id": "escalate_to", "label": {"type": "plain_text", "text": "Escalate To"}, "element": {"type": "users_select", "action_id": "value"}}
                 ],
                 "private_metadata": ticket_id
             }
@@ -383,8 +436,10 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
     if payload.get("type") == "view_submission" and payload["view"]["callback_id"] == "triage_submit":
         state = payload["view"]["state"]["values"]
         ticket_id = payload["view"].get("private_metadata")
+        summary = state["summary"]["value"]["value"]
         issue = state["issue"]["value"]["value"]
         fix = state["fix"]["value"]["value"]
+        priority = state["priority"]["value"]["selected_option"]["value"]
         resolved_date = state["resolved_date"]["value"].get("selected_date", "")
         resolved_time = state["resolved_time"]["value"].get("selected_time", "")
         resolved = f"{resolved_date} {resolved_time}".strip()
@@ -419,7 +474,9 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         "ttt_hours": f"{ttt_hours:.2f}",
                         "triaged_by": triaged_by_name,
                         "triaged_id": triaged_by_id,
-                        "resolve_at": resolved
+                        "resolve_at": resolved,
+                        "priority": priority,
+                        "summary": summary
                     }
                     if escalate_to:
                         update_dict["escalate_to"] = escalate_to_name
@@ -428,17 +485,19 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         channel=CHANNEL,
                         thread_ts=thread_ts,
                         text=(
-                            f"*Triage for Ticket #{ticket_id}*\n"
+                            f"*Summary:* {summary}\n"
                             f"*Issue:* {issue}\n"
                             f"*How to fix:* {fix}\n"
+                            f"*Priority:* {priority}\n"
                             f"*When resolved:* {resolved}\n"
                             f"*Triaged by:* <@{triaged_by_id}>"
                         ),
                         blocks=[
                             {"type": "section", "text": {"type": "mrkdwn", "text": (
-                                f"*Triage for Ticket #{ticket_id}*\n"
+                                f"*Summary:* {summary}\n"
                                 f"*Issue:* {issue}\n"
                                 f"*How to fix:* {fix}\n"
+                                f"*Priority:* {priority}\n"
                                 f"*When resolved:* {resolved}\n"
                                 f"*Triaged by:* <@{triaged_by_id}>"
                             )}}
@@ -446,6 +505,13 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     )
                     update_dict["triage_ts"] = triage_msg.get("ts")
                     update_ticket(ticket_id, update_dict)
+                    jira_issue_key = create_jira_ticket(ticket_id, summary, issue, fix, priority, resolved, triaged_by_name, ticket)
+                    if jira_issue_key:
+                        client.web_client.chat_postMessage(
+                            channel=CHANNEL,
+                            thread_ts=thread_ts,
+                            text=f"Jira ticket created: {jira_issue_key}"
+                        )
                     blocks_main = [
                         {"type": "section", "text": {"type": "mrkdwn", "text": (
                             f"*Ticket #{ticket['id']}*\n"
