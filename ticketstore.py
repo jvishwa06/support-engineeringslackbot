@@ -6,19 +6,23 @@ TICKET_CSV = "tickets.csv"
 
 FIELDNAMES = [
     "id","title","description","raised_by","raiser_id","raised_at","client_name","client_app_id","criticality","product","endpoint","assigned_to","assignee_id","frt_hours","message_ts",
-    "ttt_hours","triaged_by","triaged_id","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id"
+    "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id"
 ]
 
 def save_ticket(ticket: dict):
     try:
         is_new = not os.path.isfile(TICKET_CSV)
+        for field in FIELDNAMES:
+            if field not in ticket:
+                ticket[field] = ""
         with open(TICKET_CSV, mode="a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
             if is_new:
                 writer.writeheader()
             writer.writerow(ticket)
+        logging.info(f"Ticket saved: {ticket}")
     except Exception as e:
-        logging.error(f"Failed to save ticket to CSV: {e}")
+        logging.error(f"Failed to save ticket to CSV: {e}. Ticket data: {ticket}")
 
 def get_all_tickets():
     if not os.path.exists(TICKET_CSV):

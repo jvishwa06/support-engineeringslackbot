@@ -26,6 +26,7 @@ FRT_THRESHOLDS = {
     "Medium": float(os.getenv("FRT_HOURS_MEDIUM")),  # 3 min
     "Low": float(os.getenv("FRT_HOURS_LOW"))         # 5 min
 }
+FRT_ESCALATION_HOURS = float(os.getenv("FRT_ESCALATION_HOURS", "0.0167"))
 
 app = FastAPI()
 web_client = WebClient(token=BOT_TOKEN)
@@ -38,14 +39,29 @@ def get_escalation_members(product):
         logging.warning("Product is None in get_escalation_members")
         return []
     try:
-        with open("escalationmatrix.csv", "r") as f:
+        with open("escalationmatrixid.csv", "r") as f:
             reader = csv.reader(f)
             for row in reader:
                 if row[0].strip().lower() == product.strip().lower():
                     return [uid.strip() for uid in row[1:] if uid.strip()]
     except Exception as e:
-        logging.error(f"Error reading escalationmatrix.csv: {e}")
+        logging.error(f"Error reading escalationmatrixid.csv: {e}")
     return []
+
+def get_assignee_level(product, assignee_id):
+    """Return the level of the assignee for the product (L1, L2, L3)."""
+    try:
+        with open("escalationmatrixid.csv", "r") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if row[0].strip().lower() == product.strip().lower():
+                    levels = [uid.strip() for uid in row[1:] if uid.strip()]
+                    if assignee_id in levels:
+                        idx = levels.index(assignee_id)
+                        return f"L{idx+1}", idx, levels
+    except Exception as e:
+        logging.error(f"Error reading escalationmatrixid.csv for assignee level: {e}")
+    return None, None, []
 
 def post_ticket_message(ticket):
     try:
@@ -66,17 +82,25 @@ def post_ticket_message(ticket):
                 f"*Raised At:* {formatted_time}"
             )}}
         ]
+        action_elements = []
         if ticket.get('frt_hours'):
+            action_elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Triage"},
+                "action_id": "triage_button",
+                "value": ticket['id']
+            })
+        if ticket.get('ttt_hours'):
+            action_elements.append({
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Resolved"},
+                "action_id": "resolved_button",
+                "value": ticket['id']
+            })
+        if action_elements:
             blocks.append({
                 "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Triage"},
-                        "action_id": "triage_button",
-                        "value": ticket['id']
-                    }
-                ]
+                "elements": action_elements
             })
         result = web_client.chat_postMessage(
             channel=CHANNEL,
@@ -98,9 +122,9 @@ def post_ticket_message(ticket):
         logging.info(f"Ticket #{ticket['id']} posted to Slack with ts={result.get('ts')}")
         ticket['message_ts'] = result.get('ts')
 
-        frt_minutes = FRT_THRESHOLDS[ticket['criticality']]
-        half_frt = max(frt_minutes / 2, 1)
-        reminder_time = now + timedelta(minutes=half_frt)
+        frt_hours = FRT_THRESHOLDS[ticket['criticality']]
+        half_frt = max(frt_hours / 2, 0.0167)
+        reminder_time = now + timedelta(hours=half_frt)
         scheduler.add_job(
             send_fr_reminder,
             trigger=DateTrigger(run_date=reminder_time),
@@ -108,6 +132,15 @@ def post_ticket_message(ticket):
             id=f"reminder_{ticket['id']}"
         )
         logging.info(f"Scheduled FRT reminder for ticket #{ticket['id']} at {reminder_time}")
+
+        escalation_time = now + timedelta(hours=frt_hours - FRT_ESCALATION_HOURS)
+        scheduler.add_job(
+            send_escalation_reminder,
+            trigger=DateTrigger(run_date=escalation_time),
+            args=[ticket],
+            id=f"escalation_{ticket['id']}"
+        )
+        logging.info(f"Scheduled escalation reminder for ticket #{ticket['id']} at {escalation_time}")
         return ticket['message_ts']
     except Exception as e:
         logging.error(f"Error posting message to Slack: {e}")
@@ -128,6 +161,24 @@ def send_fr_reminder(ticket):
     except Exception as e:
         logging.error(f"Error sending FRT reminder: {e}")
 
+def send_escalation_reminder(ticket):
+    if not ticket.get("frt_hours"):
+        assignee_level, idx, levels = get_assignee_level(ticket["product"], ticket["assignee_id"])
+        if assignee_level and idx is not None and idx+1 < len(levels):
+            next_level_id = levels[idx+1]
+            reminder_text = (
+                f"🚨 FRT Escalation for Ticket #{ticket['id']}\n"
+                f"<@{next_level_id}> Please look into this ticket. Assignee <@{ticket['assignee_id']}> did not respond in time."
+            )
+            web_client.chat_postMessage(
+                channel=CHANNEL,
+                thread_ts=ticket['message_ts'],
+                text=reminder_text
+            )
+            logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to <@{next_level_id}>.")
+        else:
+            logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
+
 @socket_client.socket_mode_request_listeners.append
 def handle_events(client: SocketModeClient, req: SocketModeRequest):
     payload = req.payload
@@ -136,7 +187,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         logging.info("Received /ticketbot command")
         product_options = []
         try:
-            with open("escalationmatrix.csv", "r") as f:
+            with open("escalationmatrixid.csv", "r") as f:
                 reader = csv.reader(f)
                 next(reader, None)
                 for row in reader:
@@ -145,7 +196,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         "value": row[0]
                     })
         except Exception as e:
-            logging.error(f"Error reading escalationmatrix.csv: {e}")
+            logging.error(f"Error reading escalationmatrixid.csv: {e}")
 
         client.web_client.views_open(
             trigger_id=payload["trigger_id"],
@@ -246,33 +297,19 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         event = payload["event"]
         thread_ts = event.get("thread_ts")
         user = event.get("user")
-
         if thread_ts and user:
             all_tickets = get_all_tickets()
             for ticket in all_tickets:
-                if ticket["message_ts"] == thread_ts:
+                if ticket.get("message_ts") == thread_ts or ticket.get("triage_ts") == thread_ts:
                     logging.info(f"Checking ticket #{ticket['id']} with thread_ts={thread_ts}")
-
-                    if ticket["frt_hours"]:
-                        logging.info(f"Skipping FRT update for ticket #{ticket['id']} — already set")
-                        job_id = f"reminder_{ticket['id']}"
-                        if scheduler.get_job(job_id):
-                            scheduler.remove_job(job_id)
-                            logging.info(f"Removed FRT reminder job for ticket #{ticket['id']}")
-                        return
-
-                    escalation_names = get_escalation_members(ticket["product"])
                     try:
                         user_info = client.web_client.users_info(user=user)
                         responder_name = user_info["user"].get("real_name") or user_info["user"].get("profile", {}).get("display_name") or user
                     except Exception as e:
                         logging.error(f"Error fetching responder name: {e}")
                         responder_name = user
-                    if responder_name in escalation_names:
-                        try:
-                            logging.error(f"✅ Response received from escalation member <@{user}> ({responder_name})")
-                        except Exception as e:
-                            logging.error(f"Error sending escalation member response message: {e}")
+                    escalation_ids = get_escalation_members(ticket["product"])
+                    if user in escalation_ids and not ticket.get("frt_hours"):
                         raised_at = parser.isoparse(ticket["raised_at"])
                         now = datetime.now(pytz.timezone("Asia/Kolkata"))
                         frt = (now - raised_at).total_seconds() / 3600
@@ -291,40 +328,29 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                                 f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
                                 f"*Raised At:* {ticket['raised_at']}"
-                            )}}
+                            )}},
+                            {"type": "actions", "elements": [
+                                {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']}
+                            ]}
                         ]
-                        blocks.append({
-                            "type": "actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "Triage"},
-                                    "action_id": "triage_button",
-                                    "value": ticket['id']
-                                }
-                            ]
-                        })
-                        try:
-                            client.web_client.chat_update(
-                                channel=CHANNEL,
-                                ts=ticket['message_ts'],
-                                blocks=blocks,
-                                text=(
-                                    f"*Ticket #{ticket['id']}*\n"
-                                    f"*Title:* {ticket['title']}\n"
-                                    f"*Description:* {ticket['description']}\n"
-                                    f"*Client Name:* {ticket['client_name']}\n"
-                                    f"*Client App ID:* {ticket['client_app_id']}\n"
-                                    f"*Product:* {ticket['product']}\n"
-                                    f"*Endpoint:* `{ticket['endpoint']}`\n"
-                                    f"*Criticality:* {ticket['criticality']}\n"
-                                    f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                                    f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
-                                    f"*Raised At:* {ticket['raised_at']}"
-                                )
+                        client.web_client.chat_update(
+                            channel=CHANNEL,
+                            ts=ticket["message_ts"],
+                            blocks=blocks,
+                            text=(
+                                f"*Ticket #{ticket['id']}*\n"
+                                f"*Title:* {ticket['title']}\n"
+                                f"*Description:* {ticket['description']}\n"
+                                f"*Client Name:* {ticket['client_name']}\n"
+                                f"*Client App ID:* {ticket['client_app_id']}\n"
+                                f"*Product:* {ticket['product']}\n"
+                                f"*Endpoint:* `{ticket['endpoint']}`\n"
+                                f"*Criticality:* {ticket['criticality']}\n"
+                                f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                                f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
+                                f"*Raised At:* {ticket['raised_at']}"
                             )
-                        except Exception as e:
-                            logging.error(f"Error updating Slack message with Triage button: {e}")
+                        )
                         return
                     else:
                         logging.info(f"User <@{user}> ({responder_name}) is not an escalation member for ticket #{ticket['id']}. FRT will not be set.")
@@ -398,36 +424,68 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     if escalate_to:
                         update_dict["escalate_to"] = escalate_to_name
                         update_dict["escalate_id"] = escalate_to_id
+                    triage_msg = client.web_client.chat_postMessage(
+                        channel=CHANNEL,
+                        thread_ts=thread_ts,
+                        text=(
+                            f"*Triage for Ticket #{ticket_id}*\n"
+                            f"*Issue:* {issue}\n"
+                            f"*How to fix:* {fix}\n"
+                            f"*When resolved:* {resolved}\n"
+                            f"*Triaged by:* <@{triaged_by_id}>"
+                        ),
+                        blocks=[
+                            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                                f"*Triage for Ticket #{ticket_id}*\n"
+                                f"*Issue:* {issue}\n"
+                                f"*How to fix:* {fix}\n"
+                                f"*When resolved:* {resolved}\n"
+                                f"*Triaged by:* <@{triaged_by_id}>"
+                            )}}
+                        ]
+                    )
+                    update_dict["triage_ts"] = triage_msg.get("ts")
                     update_ticket(ticket_id, update_dict)
+                    blocks_main = [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": (
+                            f"*Ticket #{ticket['id']}*\n"
+                            f"*Title:* {ticket['title']}\n"
+                            f"*Description:* {ticket['description']}\n"
+                            f"*Client Name:* {ticket['client_name']}\n"
+                            f"*Client App ID:* {ticket['client_app_id']}\n"
+                            f"*Product:* {ticket['product']}\n"
+                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Criticality:* {ticket['criticality']}\n"
+                            f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
+                            f"*Raised At:* {ticket['raised_at']}"
+                        )}},
+                        {"type": "actions", "elements": [
+                            {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']},
+                            {"type": "button", "text": {"type": "plain_text", "text": "Resolved"}, "action_id": "resolved_button", "value": ticket['id']}
+                        ]}
+                    ]
+                    client.web_client.chat_update(
+                        channel=CHANNEL,
+                        ts=ticket["message_ts"],
+                        blocks=blocks_main,
+                        text=(
+                            f"*Ticket #{ticket['id']}*\n"
+                            f"*Title:* {ticket['title']}\n"
+                            f"*Description:* {ticket['description']}\n"
+                            f"*Client Name:* {ticket['client_name']}\n"
+                            f"*Client App ID:* {ticket['client_app_id']}\n"
+                            f"*Product:* {ticket['product']}\n"
+                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Criticality:* {ticket['criticality']}\n"
+                            f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
+                            f"*Raised At:* {ticket['raised_at']}"
+                        )
+                    )
                     break
         except Exception as e:
             logging.error(f"Error fetching ticket for triage thread or updating TTT: {e}")
-        try:
-            client.web_client.chat_postMessage(
-                channel=CHANNEL,
-                thread_ts=thread_ts,
-                text=(
-                    f"*Triage for Ticket #{ticket_id}*\n"
-                    f"*Issue:* {issue}\n"
-                    f"*How to fix:* {fix}\n"
-                    f"*When resolved:* {resolved}\n"
-                    f"*Triaged by:* <@{triaged_by_id}>"
-                ),
-                blocks=[
-                    {"type": "section", "text": {"type": "mrkdwn", "text": (
-                        f"*Triage for Ticket #{ticket_id}*\n"
-                        f"*Issue:* {issue}\n"
-                        f"*How to fix:* {fix}\n"
-                        f"*When resolved:* {resolved}\n"
-                        f"*Triaged by:* <@{triaged_by_id}>"
-                    )}},
-                    {"type": "actions", "elements": [
-                        {"type": "button", "text": {"type": "plain_text", "text": "Resolved"}, "action_id": "resolved_button", "value": ticket_id}
-                    ]}
-                ]
-            )
-        except Exception as e:
-            logging.error(f"Error posting triage info: {e}")
         client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
         return
 
@@ -451,15 +509,20 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     update_ticket(ticket_id, {"ttr_hours": f"{ttr_hours:.2f}", "resolved_by": resolver_name, "resolver_id": resolver_id})
                     blocks = [
                         {"type": "section", "text": {"type": "mrkdwn", "text": (
-                            f"*Triage for Ticket #{ticket_id}*\n"
-                            f"*Issue:* {ticket.get('issue', '')}\n"
-                            f"*How to fix:* {ticket.get('fix', '')}\n"
-                            f"*When resolved:* {ticket.get('resolved', '')}\n"
-                            f"*Triaged by:* <@{ticket.get('triaged_by', '')}>\n"
-                            f"*Resolved by:* <@{user_id}>\n"
-                            f"*TTR:* {ttr_hours:.2f} hours"
+                            f"*Ticket #{ticket['id']}*\n"
+                            f"*Title:* {ticket['title']}\n"
+                            f"*Description:* {ticket['description']}\n"
+                            f"*Client Name:* {ticket['client_name']}\n"
+                            f"*Client App ID:* {ticket['client_app_id']}\n"
+                            f"*Product:* {ticket['product']}\n"
+                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Criticality:* {ticket['criticality']}\n"
+                            f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
+                            f"*Raised At:* {ticket['raised_at']}"
                         )}},
                         {"type": "actions", "elements": [
+                            {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']},
                             {"type": "button", "text": {"type": "plain_text", "text": "✅ Resolved"}, "action_id": "noop", "value": ticket_id, "style": "primary"}
                         ]}
                     ]
@@ -468,13 +531,49 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         ts=ticket["message_ts"],
                         blocks=blocks,
                         text=(
-                            f"*Triage for Ticket #{ticket_id}*\n"
-                            f"*Issue:* {ticket.get('issue', '')}\n"
-                            f"*How to fix:* {ticket.get('fix', '')}\n"
-                            f"*When resolved:* {ticket.get('resolved', '')}\n"
-                            f"*Triaged by:* <@{ticket.get('triaged_by', '')}>\n"
-                            f"*Resolved by:* <@{user_id}>\n"
-                            f"*TTR:* {ttr_hours:.2f} hours"
+                            f"*Ticket #{ticket['id']}*\n"
+                            f"*Title:* {ticket['title']}\n"
+                            f"*Description:* {ticket['description']}\n"
+                            f"*Client Name:* {ticket['client_name']}\n"
+                            f"*Client App ID:* {ticket['client_app_id']}\n"
+                            f"*Product:* {ticket['product']}\n"
+                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Criticality:* {ticket['criticality']}\n"
+                            f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
+                            f"*Raised At:* {ticket['raised_at']}"
+                        )
+                    )
+                    summary_blocks = [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": (
+                            f"*Ticket #{ticket['id']}*\n"
+                            f"*Title:* {ticket['title']}\n"
+                            f"*Description:* {ticket['description']}\n"
+                            f"*Client Name:* {ticket['client_name']}\n"
+                            f"*Client App ID:* {ticket['client_app_id']}\n"
+                            f"*Product:* {ticket['product']}\n"
+                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Criticality:* {ticket['criticality']}\n"
+                            f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
+                            f"*Raised At:* {ticket['raised_at']}"
+                        )}},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": (
+                            f"*FRT:* {ticket.get('frt_hours', 'N/A')} hours\n"
+                            f"*TTT:* {ticket.get('ttt_hours', 'N/A')} hours\n"
+                            f"*TTR:* {ttr_hours:.2f} hours\n"
+                            f"*Resolved by:* <@{resolver_id}> ({resolver_name})"
+                        )}}
+                    ]
+                    client.web_client.chat_postMessage(
+                        channel="C0958JC4GCE",
+                        blocks=summary_blocks,
+                        text=(
+                            f"Ticket #{ticket['id']} resolved.\n"
+                            f"FRT: {ticket.get('frt_hours', 'N/A')} hours, "
+                            f"TTT: {ticket.get('ttt_hours', 'N/A')} hours, "
+                            f"TTR: {ttr_hours:.2f} hours, "
+                            f"Resolved by: {resolver_name}"
                         )
                     )
                     break

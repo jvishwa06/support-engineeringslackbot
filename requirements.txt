@@ -1,0 +1,7 @@
+fastapi
+slack_sdk
+python-dotenv
+uvicorn
+apscheduler
+python-dateutil
+pytz
