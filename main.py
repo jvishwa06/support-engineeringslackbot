@@ -33,6 +33,7 @@ JIRA_URL = os.getenv("JIRA_URL")
 JIRA_USER = os.getenv("JIRA_USER")
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")
 JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY")
+RESOLVED_SUMMARY_CHANNEL = os.getenv("RESOLVED_SUMMARY_CHANNEL")
 
 app = FastAPI()
 web_client = WebClient(token=BOT_TOKEN)
@@ -132,7 +133,7 @@ def post_ticket_message(ticket):
                 f"*Client Name:* {ticket['client_name']}\n"
                 f"*Client App ID:* {ticket['client_app_id']}\n"
                 f"*Product:* {ticket['product']}\n"
-                f"*Endpoint:* `{ticket['endpoint']}`\n"
+                f"*Curl Command:* `{ticket['endpoint']}`\n"
                 f"*Criticality:* {ticket['criticality']}\n"
                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                 f"*Raised By:* <@{ticket['raiser_id']}>\n"
@@ -168,7 +169,7 @@ def post_ticket_message(ticket):
                 f"*Client Name:* {ticket['client_name']}\n"
                 f"*Client App ID:* {ticket['client_app_id']}\n"
                 f"*Product:* {ticket['product']}\n"
-                f"*Endpoint:* `{ticket['endpoint']}`\n"
+                f"*Curl Command:* `{ticket['endpoint']}`\n"
                 f"*Criticality:* {ticket['criticality']}\n"
                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                 f"*Raised By:* <@{ticket['raiser_id']}>\n"
@@ -262,7 +263,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                 "submit": {"type": "plain_text", "text": "Submit"},
                 "blocks": [
                     {"type": "input", "block_id": "title", "label": {"type": "plain_text", "text": "Title"}, "element": {"type": "plain_text_input", "action_id": "value"}},
-                    {"type": "input", "block_id": "description", "label": {"type": "plain_text", "text": "Description"}, "element": {"type": "plain_text_input", "action_id": "value", "multiline": True}},
+                    {"type": "input", "block_id": "description", "label": {"type": "plain_text", "text": "Description"}, "element": {"type": "rich_text_input", "action_id": "value"}},
                     {"type": "input", "block_id": "client_name", "label": {"type": "plain_text", "text": "Client Name"}, "element": {"type": "plain_text_input", "action_id": "value"}},
                     {"type": "input", "block_id": "client_app_id", "label": {"type": "plain_text", "text": "Client App ID"}, "element": {"type": "plain_text_input", "action_id": "value"}},
                     {
@@ -281,7 +282,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     },
 
                     {"type": "input", "block_id": "product", "label": {"type": "plain_text", "text": "Product"}, "element": {"type": "static_select", "action_id": "value", "options": product_options}},
-                    {"type": "input", "block_id": "endpoint", "label": {"type": "plain_text", "text": "Endpoint (starts with /)"}, "element": {"type": "plain_text_input", "action_id": "value"}},
+                    {"type": "input", "block_id": "endpoint", "label": {"type": "plain_text", "text": "Curl Command"}, "element": {"type": "plain_text_input", "action_id": "value"}},
                     {"type": "input", "block_id": "assignee", "label": {"type": "plain_text", "text": "Assign To"}, "element": {"type": "users_select", "action_id": "value"}}
                 ]
             }
@@ -292,18 +293,6 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
     if payload.get("type") == "view_submission" and payload["view"]["callback_id"] == "submit_ticket":
         state = payload["view"]["state"]["values"]
         endpoint = state["endpoint"]["value"]["value"].strip()
-
-        if not endpoint.startswith("/") or endpoint == "/":
-            client.send_socket_mode_response(SocketModeResponse(
-                envelope_id=req.envelope_id,
-                payload={
-                    "response_action": "errors",
-                    "errors": {
-                        "endpoint": "Invalid API endpoint. It must start with '/' and cannot be just '/'"
-                    }
-                }
-            ))
-            return
 
         ticket_id = datetime.now().strftime("%Y%m%d%H%M%S")
         raised_at = datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()
@@ -323,10 +312,40 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
             logging.error(f"Error fetching assigned_to name: {e}")
             assigned_to_name = assignee_id
 
+        def extract_plain_text_from_rich_text(rich_text):
+            if isinstance(rich_text, str):
+                return rich_text
+            if isinstance(rich_text, dict) and rich_text.get('type') == 'rich_text':
+                text = ''
+                for section in rich_text.get('elements', []):
+                    if section.get('type') == 'rich_text_section':
+                        for el in section.get('elements', []):
+                            if el.get('type') == 'text':
+                                text += el.get('text', '')
+                            elif el.get('type') == 'emoji':
+                                text += f":{el.get('name', '')}:"
+                            elif el.get('type') == 'link':
+                                url = el.get('url', '')
+                                link_text = el.get('text', url)
+                                text += f"<{url}|{link_text}>"
+                    elif section.get('type') == 'text':
+                        text += section.get('text', '')
+                return text
+            return str(rich_text)
+
+        description_block = state["description"]["value"]
+        if "rich_text_value" in description_block:
+            description_raw = description_block["rich_text_value"]
+        elif "value" in description_block:
+            description_raw = description_block["value"]
+        else:
+            description_raw = ""
+        description = extract_plain_text_from_rich_text(description_raw)
+
         ticket = {
             "id": ticket_id,
             "title": state["title"]["value"]["value"],
-            "description": state["description"]["value"]["value"],
+            "description": description,
             "raised_by": raised_by_name,
             "raiser_id": user_id,
             "raised_at": raised_at,
@@ -386,7 +405,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Client Name:* {ticket['client_name']}\n"
                                 f"*Client App ID:* {ticket['client_app_id']}\n"
                                 f"*Product:* {ticket['product']}\n"
-                                f"*Endpoint:* `{ticket['endpoint']}`\n"
+                                f"*Curl Command:* `{ticket['endpoint']}`\n"
                                 f"*Criticality:* {ticket['criticality']}\n"
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                                 f"*Raised By:* <@{ticket['raiser_id']}>\n"
@@ -405,7 +424,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Client Name:* {ticket['client_name']}\n"
                                 f"*Client App ID:* {ticket['client_app_id']}\n"
                                 f"*Product:* {ticket['product']}\n"
-                                f"*Endpoint:* `{ticket['endpoint']}`\n"
+                                f"*Curl Command:* `{ticket['endpoint']}`\n"
                                 f"*Criticality:* {ticket['criticality']}\n"
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                                 f"*Raised By:* {raised_by_display}\n"
@@ -425,7 +444,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Client Name:* {ticket['client_name']}\n"
                                 f"*Client App ID:* {ticket['client_app_id']}\n"
                                 f"*Product:* {ticket['product']}\n"
-                                f"*Endpoint:* `{ticket['endpoint']}`\n"
+                                f"*Curl Command:* `{ticket['endpoint']}`\n"
                                 f"*Criticality:* {ticket['criticality']}\n"
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                                 f"*Raised By:* {raised_by_display}\n"
@@ -450,15 +469,14 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                 "submit": {"type": "plain_text", "text": "Submit"},
                 "blocks": [
                     {"type": "input", "block_id": "summary", "label": {"type": "plain_text", "text": "Summary"}, "element": {"type": "plain_text_input", "action_id": "value"}},
-                    {"type": "input", "block_id": "issue", "label": {"type": "plain_text", "text": "What's the issue"}, "element": {"type": "plain_text_input", "action_id": "value", "multiline": True}},
-                    {"type": "input", "block_id": "fix", "label": {"type": "plain_text", "text": "What's the fix"}, "element": {"type": "plain_text_input", "action_id": "value", "multiline": True}},
+                    {"type": "input", "block_id": "issue", "label": {"type": "plain_text", "text": "What's the issue"}, "element": {"type": "rich_text_input", "action_id": "value"}},
+                    {"type": "input", "block_id": "fix", "label": {"type": "plain_text", "text": "What's the fix"}, "element": {"type": "rich_text_input", "action_id": "value"}},
                     {"type": "input", "block_id": "priority", "label": {"type": "plain_text", "text": "Priority"}, "element": {"type": "static_select", "action_id": "value", "options": [
                         {"text": {"type": "plain_text", "text": "High"}, "value": "High"},
                         {"text": {"type": "plain_text", "text": "Medium"}, "value": "Medium"},
                         {"text": {"type": "plain_text", "text": "Low"}, "value": "Low"}
                     ]}},
                     {"type": "input", "block_id": "resolved_date", "label": {"type": "plain_text", "text": "When resolved (Date)"}, "element": {"type": "datepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select a date"}}},
-                    {"type": "input", "block_id": "resolved_time", "label": {"type": "plain_text", "text": "When resolved (Time)"}, "element": {"type": "timepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select time"}}},
                     {"type": "input", "block_id": "escalate_to", "label": {"type": "plain_text", "text": "Assignee"}, "element": {"type": "users_select", "action_id": "value"}}
                 ],
                 "private_metadata": ticket_id
@@ -471,12 +489,44 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         state = payload["view"]["state"]["values"]
         ticket_id = payload["view"].get("private_metadata")
         summary = state["summary"]["value"]["value"]
-        issue = state["issue"]["value"]["value"]
-        fix = state["fix"]["value"]["value"]
+        def extract_plain_text_from_rich_text(rich_text):
+            if isinstance(rich_text, str):
+                return rich_text
+            if isinstance(rich_text, dict) and rich_text.get('type') == 'rich_text':
+                text = ''
+                for section in rich_text.get('elements', []):
+                    if section.get('type') == 'rich_text_section':
+                        for el in section.get('elements', []):
+                            if el.get('type') == 'text':
+                                text += el.get('text', '')
+                            elif el.get('type') == 'emoji':
+                                text += f":{el.get('name', '')}:"
+                            elif el.get('type') == 'link':
+                                url = el.get('url', '')
+                                link_text = el.get('text', url)
+                                text += f"<{url}|{link_text}>"
+                    elif section.get('type') == 'text':
+                        text += section.get('text', '')
+                return text
+            return str(rich_text)
+        issue_block = state["issue"]["value"]
+        if "rich_text_value" in issue_block:
+            issue_raw = issue_block["rich_text_value"]
+        elif "value" in issue_block:
+            issue_raw = issue_block["value"]
+        else:
+            issue_raw = ""
+        issue = extract_plain_text_from_rich_text(issue_raw)
+        fix_block = state["fix"]["value"]
+        if "rich_text_value" in fix_block:
+            fix_raw = fix_block["rich_text_value"]
+        elif "value" in fix_block:
+            fix_raw = fix_block["value"]
+        else:
+            fix_raw = ""
+        fix = extract_plain_text_from_rich_text(fix_raw)
         priority = state["priority"]["value"]["selected_option"]["value"]
         resolved_date = state["resolved_date"]["value"].get("selected_date", "")
-        resolved_time = state["resolved_time"]["value"].get("selected_time", "")
-        resolved = f"{resolved_date} {resolved_time}".strip()
         escalate_to = state.get("escalate_to", {}).get("value", {}).get("selected_user", "")
         thread_ts = None
         triaged_by_id = payload["user"]["id"]
@@ -508,9 +558,11 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         "ttt_hours": f"{ttt_hours:.2f}",
                         "triaged_by": triaged_by_name,
                         "triaged_id": triaged_by_id,
-                        "resolve_at": resolved,
+                        "resolve_at": resolved_date,
                         "priority": priority,
-                        "summary": summary
+                        "summary": summary,
+                        "issue": issue,
+                        "fix": fix
                     }
                     if escalate_to:
                         update_dict["escalate_to"] = escalate_to_name
@@ -521,9 +573,9 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         text=(
                             f"*Summary:* {summary}\n"
                             f"*Issue:* {issue}\n"
-                            f"*How to fix:* {fix}\n"
+                            f"How to fix:* {fix}\n"
                             f"*Priority:* {priority}\n"
-                            f"*When resolved:* {resolved}\n"
+                            f"*When resolved:* {resolved_date}\n"
                             f"*Triaged by:* <@{triaged_by_id}>\n"
                             f"*Assignee:* <@{ticket['assignee_id']}>"
                         ),
@@ -533,21 +585,16 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Issue:* {issue}\n"
                                 f"*How to fix:* {fix}\n"
                                 f"*Priority:* {priority}\n"
-                                f"*When resolved:* {resolved}\n"
+                                f"*When resolved:* {resolved_date}\n"
                                 f"*Triaged by:* <@{triaged_by_id}>\n"
-                                f"*Assignee:* <@{ticket['assignee_id']}>"
-                            )}}
+                                f"*Assignee:* <@{ticket['assignee_id']}>")}},
+                            {"type": "actions", "elements": [
+                                {"type": "button", "text": {"type": "plain_text", "text": "Create Jira Ticket"}, "action_id": "create_jira_button", "value": ticket_id}
+                            ]}
                         ]
                     )
                     update_dict["triage_ts"] = triage_msg.get("ts")
                     update_ticket(ticket_id, update_dict)
-                    jira_issue_key = create_jira_ticket(ticket_id, summary, issue, fix, priority, resolved, triaged_by_name, ticket)
-                    if jira_issue_key:
-                        client.web_client.chat_postMessage(
-                            channel=CHANNEL,
-                            thread_ts=thread_ts,
-                            text=f"Jira ticket created: {jira_issue_key}"
-                        )
                     formatted_raised_at = datetime.strptime(ticket["raised_at"], "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%b %d, %Y, %-I:%M %p") if ticket.get('raised_at') else ""
                     blocks_main = [
                         {"type": "section", "text": {"type": "mrkdwn", "text": (
@@ -556,7 +603,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Client Name:* {ticket['client_name']}\n"
                             f"*Client App ID:* {ticket['client_app_id']}\n"
                             f"*Product:* {ticket['product']}\n"
-                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Curl Command:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                             f"*Raised By:* <@{ticket['raiser_id']}>\n"
@@ -577,7 +624,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Client Name:* {ticket['client_name']}\n"
                             f"*Client App ID:* {ticket['client_app_id']}\n"
                             f"*Product:* {ticket['product']}\n"
-                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Curl Command:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                             f"*Raised By:* <@{ticket['raiser_id']}>\n"
@@ -590,6 +637,58 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
         return
 
+    if req.type == "interactive" and payload.get("actions", [{}])[0].get("action_id") == "create_jira_button":
+        ticket_id = payload["actions"][0]["value"]
+        user_id = payload["user"]["id"]
+        try:
+            all_tickets = get_all_tickets()
+            for ticket in all_tickets:
+                if ticket["id"] == ticket_id:
+                    summary = ticket.get("summary", "")
+                    issue = ticket.get("issue", "")
+                    fix = ticket.get("fix", "")
+                    priority = ticket.get("priority", "")
+                    resolved = ticket.get("resolve_at", "")
+                    triaged_by_name = ticket.get("triaged_by", "")
+                    jira_issue_key = create_jira_ticket(ticket_id, summary, issue, fix, priority, resolved, triaged_by_name, ticket)
+                    if jira_issue_key:
+                        blocks = [
+                            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                                f"*Summary:* {summary}\n"
+                                f"*Issue:* {issue}\n"
+                                f"*How to fix:* {fix}\n"
+                                f"*Priority:* {priority}\n"
+                                f"*When resolved:* {resolved}\n"
+                                f"*Triaged by:* <@{ticket.get('triaged_id', user_id)}>\n"
+                                f"*Assignee:* <@{ticket['assignee_id']}>")}},
+                            {"type": "actions", "elements": [
+                                {"type": "button", "text": {"type": "plain_text", "text": "✅ Jira Created"}, "action_id": "noop", "value": ticket_id, "style": "primary"}
+                            ]}
+                        ]
+                        client.web_client.chat_update(
+                            channel=CHANNEL,
+                            ts=ticket.get("triage_ts"),
+                            blocks=blocks,
+                            text=(
+                                f"*Summary:* {summary}\n"
+                                f"*Issue:* {issue}\n"
+                                f"*How to fix:* {fix}\n"
+                                f"*Priority:* {priority}\n"
+                                f"*When resolved:* {resolved}\n"
+                                f"*Triaged by:* <@{ticket.get('triaged_id', user_id)}>\n"
+                                f"*Assignee:* <@{ticket['assignee_id']}>")
+                        )
+                        client.web_client.chat_postMessage(
+                            channel=CHANNEL,
+                            thread_ts=ticket.get("triage_ts"),
+                            text=f"Jira ticket created: {jira_issue_key}"
+                        )
+                    break
+        except Exception as e:
+            logging.error(f"Error handling create_jira_button: {e}")
+        client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
+        return
+
     if req.type == "interactive" and payload.get("actions", [{}])[0].get("action_id") == "resolved_button":
         ticket_id = payload["actions"][0]["value"]
         user_id = payload["user"]["id"]
@@ -597,17 +696,24 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
             all_tickets = get_all_tickets()
             for ticket in all_tickets:
                 if ticket["id"] == ticket_id:
-                    raised_at = parser.isoparse(ticket["raised_at"])
                     now = datetime.now(pytz.timezone("Asia/Kolkata"))
-                    ttr_hours = (now - raised_at).total_seconds() / 3600
-                    resolver_id = user_id
-                    try:
-                        resolver_info = client.web_client.users_info(user=resolver_id)
-                        resolver_name = resolver_info["user"].get("real_name") or resolver_info["user"].get("profile", {}).get("display_name") or resolver_id
-                    except Exception as e:
-                        logging.error(f"Error fetching resolver name: {e}")
-                        resolver_name = resolver_id
-                    update_ticket(ticket_id, {"ttr_hours": f"{ttr_hours:.2f}", "resolved_by": resolver_name, "resolver_id": resolver_id})
+                    resolved_by_info = client.web_client.users_info(user=user_id)
+                    resolved_by_name = resolved_by_info["user"].get("real_name") or resolved_by_info["user"].get("profile", {}).get("display_name") or user_id
+                    update_dict = {
+                        "resolved_by": resolved_by_name,
+                        "resolver_id": user_id,
+                        "resolve_at": now.strftime("%Y-%m-%d"),
+                        "ttr_hours": ""
+                    }
+                    if ticket.get("raised_at"):
+                        try:
+                            raised_at = parser.isoparse(ticket["raised_at"])
+                            ttr_hours = (now - raised_at).total_seconds() / 3600
+                            update_dict["ttr_hours"] = f"{ttr_hours:.2f}"
+                        except Exception as e:
+                            logging.error(f"Error calculating TTR: {e}")
+                    update_ticket(ticket_id, update_dict)
+                    formatted_raised_at = datetime.strptime(ticket["raised_at"], "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%b %d, %Y, %-I:%M %p") if ticket.get('raised_at') else ""
                     blocks = [
                         {"type": "section", "text": {"type": "mrkdwn", "text": (
                             f"*Title:* {ticket['title']}\n"
@@ -615,14 +721,15 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Client Name:* {ticket['client_name']}\n"
                             f"*Client App ID:* {ticket['client_app_id']}\n"
                             f"*Product:* {ticket['product']}\n"
-                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Curl Command:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                             f"*Raised By:* <@{ticket['raiser_id']}>\n"
-                            f"*Raised At:* {datetime.strptime(ticket['raised_at'], '%Y-%m-%dT%H:%M:%S.%f%z').strftime('%b %d, %Y, %-I:%M %p') if ticket.get('raised_at') else ''}"
+                            f"*Raised At:* {formatted_raised_at}\n"
+                            f"*Resolved By:* <@{user_id}>\n"
+                            f"*Resolved At:* {now.strftime('%b %d, %Y, %-I:%M %p')}"
                         )}},
                         {"type": "actions", "elements": [
-                            {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']},
                             {"type": "button", "text": {"type": "plain_text", "text": "✅ Resolved"}, "action_id": "noop", "value": ticket_id, "style": "primary"}
                         ]}
                     ]
@@ -636,47 +743,64 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Client Name:* {ticket['client_name']}\n"
                             f"*Client App ID:* {ticket['client_app_id']}\n"
                             f"*Product:* {ticket['product']}\n"
-                            f"*Endpoint:* `{ticket['endpoint']}`\n"
+                            f"*Curl Command:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                             f"*Raised By:* <@{ticket['raiser_id']}>\n"
-                            f"*Raised At:* {datetime.strptime(ticket['raised_at'], '%Y-%m-%dT%H:%M:%S.%f%z').strftime('%b %d, %Y, %-I:%M %p') if ticket.get('raised_at') else ''}"
+                            f"*Raised At:* {formatted_raised_at}\n"
+                            f"*Resolved By:* <@{user_id}>\n"
+                            f"*Resolved At:* {now.strftime('%b %d, %Y, %-I:%M %p')}"
                         )
                     )
-                    summary_blocks = [
-                        {"type": "section", "text": {"type": "mrkdwn", "text": (
-                            f"*Title:* {ticket['title']}\n"
-                            f"*Description:* {ticket['description']}\n"
-                            f"*Client Name:* {ticket['client_name']}\n"
-                            f"*Client App ID:* {ticket['client_app_id']}\n"
-                            f"*Product:* {ticket['product']}\n"
-                            f"*Endpoint:* `{ticket['endpoint']}`\n"
-                            f"*Criticality:* {ticket['criticality']}\n"
-                            f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                            f"*Raised By:* <@{ticket['raiser_id']}>\n"
-                            f"*Raised At:* {datetime.strptime(ticket['raised_at'], '%Y-%m-%dT%H:%M:%S.%f%z').strftime('%b %d, %Y, %-I:%M %p') if ticket.get('raised_at') else ''}"
-                        )}},
-                        {"type": "section", "text": {"type": "mrkdwn", "text": (
-                            f"*FRT:* {ticket.get('frt_hours', 'N/A')} hours\n"
-                            f"*TTT:* {ticket.get('ttt_hours', 'N/A')} hours\n"
-                            f"*TTR:* {ttr_hours:.2f} hours\n"
-                            f"*Resolved by:* <@{resolver_id}>"
-                        )}}
-                    ]
                     client.web_client.chat_postMessage(
-                        channel="C0958JC4GCE",
-                        blocks=summary_blocks,
-                        text=(
-                            f"Ticket resolved.\n"
-                            f"FRT: {ticket.get('frt_hours', 'N/A')} hours, "
-                            f"TTT: {ticket.get('ttt_hours', 'N/A')} hours, "
-                            f"TTR: {ttr_hours:.2f} hours, "
-                            f"Resolved by: <@{resolver_id}>\n"
-                        )
+                        channel=CHANNEL,
+                        thread_ts=ticket["message_ts"],
+                        text=f"Ticket marked as resolved by <@{user_id}>."
+                    )
+                    def get_display_name(user_id):
+                        try:
+                            info = client.web_client.users_info(user=user_id)
+                            return info["user"].get("real_name") or info["user"].get("profile", {}).get("display_name") or user_id
+                        except Exception:
+                            return user_id
+                    raised_by_name = get_display_name(ticket.get("raiser_id", ""))
+                    assigned_to_name = get_display_name(ticket.get("assignee_id", ""))
+                    triaged_by_name = get_display_name(ticket.get("triaged_id", ""))
+                    assignee_name = assigned_to_name
+                    resolved_by_name = get_display_name(user_id)
+                    formatted_raised_at = datetime.strptime(ticket["raised_at"], "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%b %d, %Y, %-I:%M %p") if ticket.get('raised_at') else ""
+                    summary_text = (
+                        f"Title: {ticket['title']}\n"
+                        f"Description: {ticket['description']}\n"
+                        f"Client Name: {ticket['client_name']}\n"
+                        f"Client App ID: {ticket['client_app_id']}\n"
+                        f"Product: {ticket['product']}\n"
+                        f"Curl Command: {ticket['endpoint']}\n"
+                        f"Criticality: {ticket['criticality']}\n"
+                        f"Assigned To: @{assigned_to_name}\n"
+                        f"Raised By: @{raised_by_name}\n"
+                        f"Raised At: {formatted_raised_at}\n"
+                        f"Resolved By: @{resolved_by_name}\n"
+                        f"\n"
+                        f"Summary: {ticket.get('summary', '')}\n"
+                        f"Issue: {ticket.get('issue', '')}\n"
+                        f"How to fix: {ticket.get('fix', '')}\n"
+                        f"Priority: {ticket.get('priority', '')}\n"
+                        f"When resolved: {ticket.get('resolve_at', '')}\n"
+                        f"Triaged by: @{triaged_by_name}\n"
+                        f"Assignee: @{assignee_name}\n"
+                        f"\n"
+                        f"FRT: {ticket.get('frt_hours', '')} hours\n"
+                        f"TTT: {ticket.get('ttt_hours', '')} hours\n"
+                        f"TTR: {ticket.get('ttr_hours', '')} hours"
+                    )
+                    client.web_client.chat_postMessage(
+                        channel=RESOLVED_SUMMARY_CHANNEL,
+                        text=summary_text
                     )
                     break
         except Exception as e:
-            logging.error(f"Error handling resolved button: {e}")
+            logging.error(f"Error handling resolved_button: {e}")
         client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
         return
 
