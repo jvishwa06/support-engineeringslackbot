@@ -23,9 +23,9 @@ APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 PORT = int(os.getenv("PORT"))
 CHANNEL = os.getenv("CHANNEL")
 FRT_THRESHOLDS = {
-    "High": float(os.getenv("FRT_HOURS_HIGH")),      # 2 min
-    "Medium": float(os.getenv("FRT_HOURS_MEDIUM")),  # 3 min
-    "Low": float(os.getenv("FRT_HOURS_LOW"))         # 5 min
+    "High": float(os.getenv("FRT_HOURS_HIGH")),      # 3 min
+    "Medium": float(os.getenv("FRT_HOURS_MEDIUM")),  # 5 min
+    "Low": float(os.getenv("FRT_HOURS_LOW"))         # 10 min
 }
 FRT_ESCALATION_HOURS = float(os.getenv("FRT_ESCALATION_HOURS")) #1 min
 
@@ -53,14 +53,15 @@ def create_jira_ticket(ticket_id, summary, issue, fix, priority, resolved, triag
         except Exception as e:
             logging.warning(f"Could not parse due date: {resolved}, error: {e}")
     assignee = ticket.get('assignee_id', '')
+    slack_message_link = f"https://slack.com/app_redirect?channel={CHANNEL}&message_ts={ticket.get('message_ts', '')}"
     jira_description = (
-        f"Ticket Details:\n"
         f"Issue: {issue}\n"
         f"How to fix: {fix}\n"
         f"Client Name: {ticket.get('client_name', '')}\n"
         f"Client App ID: {ticket.get('client_app_id', '')}\n"
         f"Product: {ticket.get('product', '')}\n"
-        f"Endpoint: {ticket.get('endpoint', '')}"
+        f"Endpoint: {ticket.get('endpoint', '')}\n"
+        f"Slack Message: {slack_message_link}"
     )
     payload = {
         "fields": {
@@ -162,7 +163,6 @@ def post_ticket_message(ticket):
             channel=CHANNEL,
             blocks=blocks,
             text=(
-                f"*Ticket #{ticket['id']}*\n"
                 f"*Title:* {ticket['title']}\n"
                 f"*Description:* {ticket['description']}\n"
                 f"*Client Name:* {ticket['client_name']}\n"
@@ -178,31 +178,37 @@ def post_ticket_message(ticket):
         logging.info(f"Ticket #{ticket['id']} posted to Slack with ts={result.get('ts')}")
         ticket['message_ts'] = result.get('ts')
 
-        frt_hours = FRT_THRESHOLDS[ticket['criticality']]
-        half_frt = max(frt_hours / 2, 0.0167)
-        reminder_time = now + timedelta(hours=half_frt)
-        scheduler.add_job(
-            send_fr_reminder,
-            trigger=DateTrigger(run_date=reminder_time),
-            args=[ticket],
-            id=f"reminder_{ticket['id']}"
-        )
-        logging.info(f"Scheduled FRT reminder for ticket #{ticket['id']} at {reminder_time}")
+        if not ticket.get('frt_hours'):
+            frt_hours = FRT_THRESHOLDS[ticket['criticality']]
+            half_frt = max(frt_hours / 2, 0.0167)
+            reminder_time = now + timedelta(hours=half_frt)
+            scheduler.add_job(
+                send_fr_reminder,
+                trigger=DateTrigger(run_date=reminder_time),
+                args=[ticket],
+                id=f"reminder_{ticket['id']}"
+            )
+            logging.info(f"Scheduled FRT reminder for ticket #{ticket['id']} at {reminder_time}")
 
-        escalation_time = now + timedelta(hours=frt_hours - FRT_ESCALATION_HOURS)
-        scheduler.add_job(
-            send_escalation_reminder,
-            trigger=DateTrigger(run_date=escalation_time),
-            args=[ticket],
-            id=f"escalation_{ticket['id']}"
-        )
-        logging.info(f"Scheduled escalation reminder for ticket #{ticket['id']} at {escalation_time}")
+            escalation_time = now + timedelta(hours=frt_hours - FRT_ESCALATION_HOURS)
+            scheduler.add_job(
+                send_escalation_reminder,
+                trigger=DateTrigger(run_date=escalation_time),
+                args=[ticket],
+                id=f"escalation_{ticket['id']}"
+            )
+            logging.info(f"Scheduled escalation reminder for ticket #{ticket['id']} at {escalation_time}")
+        else:
+            logging.info(f"FRT already set for ticket #{ticket['id']}, not scheduling reminders.")
         return ticket['message_ts']
     except Exception as e:
         logging.error(f"Error posting message to Slack: {e}")
         return None
 
 def send_fr_reminder(ticket):
+    if ticket.get('frt_hours'):
+        logging.info(f"FRT already set for ticket #{ticket['id']}, skipping FRT reminder.")
+        return
     try:
         reminder_text = (
             f"⏰ <@{ticket['assignee_id']}>, please take a look and respond as soon as possible."
@@ -213,6 +219,9 @@ def send_fr_reminder(ticket):
         logging.error(f"Error sending FRT reminder: {e}")
 
 def send_escalation_reminder(ticket):
+    if ticket.get('frt_hours'):
+        logging.info(f"FRT already set for ticket #{ticket['id']}, skipping escalation reminder.")
+        return
     if not ticket.get("frt_hours"):
         assignee_level, idx, levels = get_assignee_level(ticket["product"], ticket["assignee_id"])
         if assignee_level and idx is not None and idx+1 < len(levels):
@@ -362,9 +371,16 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         frt = (now - raised_at).total_seconds() / 3600
                         update_ticket(ticket["id"], {"frt_hours": f"{frt:.2f}"})
                         logging.info(f"✅ FRT for ticket #{ticket['id']} set to {frt:.2f} hours by <@{user}> ({responder_name})")
+                        try:
+                            scheduler.remove_job(f"reminder_{ticket['id']}")
+                        except Exception as e:
+                            logging.info(f"No FRT reminder job to remove for ticket #{ticket['id']}: {e}")
+                        try:
+                            scheduler.remove_job(f"escalation_{ticket['id']}")
+                        except Exception as e:
+                            logging.info(f"No escalation reminder job to remove for ticket #{ticket['id']}: {e}")
                         blocks = [
                             {"type": "section", "text": {"type": "mrkdwn", "text": (
-                                f"*Ticket #{ticket['id']}*\n"
                                 f"*Title:* {ticket['title']}\n"
                                 f"*Description:* {ticket['description']}\n"
                                 f"*Client Name:* {ticket['client_name']}\n"
@@ -373,8 +389,27 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Endpoint:* `{ticket['endpoint']}`\n"
                                 f"*Criticality:* {ticket['criticality']}\n"
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                                f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
+                                f"*Raised By:* <@{ticket['raiser_id']}>\n"
                                 f"*Raised At:* {ticket['raised_at']}"
+                            )}},
+                            {"type": "actions", "elements": [
+                                {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']}
+                            ]}
+                        ]
+                        raised_by_display = ticket.get('raised_by', ticket.get('raiser_id', ''))
+                        formatted_raised_at = datetime.strptime(ticket["raised_at"], "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%b %d, %Y, %-I:%M %p") if ticket.get('raised_at') else ""
+                        blocks = [
+                            {"type": "section", "text": {"type": "mrkdwn", "text": (
+                                f"*Title:* {ticket['title']}\n"
+                                f"*Description:* {ticket['description']}\n"
+                                f"*Client Name:* {ticket['client_name']}\n"
+                                f"*Client App ID:* {ticket['client_app_id']}\n"
+                                f"*Product:* {ticket['product']}\n"
+                                f"*Endpoint:* `{ticket['endpoint']}`\n"
+                                f"*Criticality:* {ticket['criticality']}\n"
+                                f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                                f"*Raised By:* {raised_by_display}\n"
+                                f"*Raised At:* {formatted_raised_at}"
                             )}},
                             {"type": "actions", "elements": [
                                 {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']}
@@ -385,7 +420,6 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             ts=ticket["message_ts"],
                             blocks=blocks,
                             text=(
-                                f"*Ticket #{ticket['id']}*\n"
                                 f"*Title:* {ticket['title']}\n"
                                 f"*Description:* {ticket['description']}\n"
                                 f"*Client Name:* {ticket['client_name']}\n"
@@ -394,8 +428,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Endpoint:* `{ticket['endpoint']}`\n"
                                 f"*Criticality:* {ticket['criticality']}\n"
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                                f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
-                                f"*Raised At:* {ticket['raised_at']}"
+                                f"*Raised By:* {raised_by_display}\n"
+                                f"*Raised At:* {formatted_raised_at}"
                             )
                         )
                         return
@@ -425,7 +459,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     ]}},
                     {"type": "input", "block_id": "resolved_date", "label": {"type": "plain_text", "text": "When resolved (Date)"}, "element": {"type": "datepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select a date"}}},
                     {"type": "input", "block_id": "resolved_time", "label": {"type": "plain_text", "text": "When resolved (Time)"}, "element": {"type": "timepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select time"}}},
-                    {"type": "input", "block_id": "escalate_to", "label": {"type": "plain_text", "text": "Escalate To"}, "element": {"type": "users_select", "action_id": "value"}}
+                    {"type": "input", "block_id": "escalate_to", "label": {"type": "plain_text", "text": "Assignee"}, "element": {"type": "users_select", "action_id": "value"}}
                 ],
                 "private_metadata": ticket_id
             }
@@ -490,7 +524,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*How to fix:* {fix}\n"
                             f"*Priority:* {priority}\n"
                             f"*When resolved:* {resolved}\n"
-                            f"*Triaged by:* <@{triaged_by_id}>"
+                            f"*Triaged by:* <@{triaged_by_id}>\n"
+                            f"*Assignee:* <@{ticket['assignee_id']}>"
                         ),
                         blocks=[
                             {"type": "section", "text": {"type": "mrkdwn", "text": (
@@ -499,7 +534,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*How to fix:* {fix}\n"
                                 f"*Priority:* {priority}\n"
                                 f"*When resolved:* {resolved}\n"
-                                f"*Triaged by:* <@{triaged_by_id}>"
+                                f"*Triaged by:* <@{triaged_by_id}>\n"
+                                f"*Assignee:* <@{ticket['assignee_id']}>"
                             )}}
                         ]
                     )
@@ -512,9 +548,9 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             thread_ts=thread_ts,
                             text=f"Jira ticket created: {jira_issue_key}"
                         )
+                    formatted_raised_at = datetime.strptime(ticket["raised_at"], "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%b %d, %Y, %-I:%M %p") if ticket.get('raised_at') else ""
                     blocks_main = [
                         {"type": "section", "text": {"type": "mrkdwn", "text": (
-                            f"*Ticket #{ticket['id']}*\n"
                             f"*Title:* {ticket['title']}\n"
                             f"*Description:* {ticket['description']}\n"
                             f"*Client Name:* {ticket['client_name']}\n"
@@ -523,8 +559,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Endpoint:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
-                            f"*Raised At:* {ticket['raised_at']}"
+                            f"*Raised By:* <@{ticket['raiser_id']}>\n"
+                            f"*Raised At:* {formatted_raised_at}"
                         )}},
                         {"type": "actions", "elements": [
                             {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']},
@@ -536,7 +572,6 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         ts=ticket["message_ts"],
                         blocks=blocks_main,
                         text=(
-                            f"*Ticket #{ticket['id']}*\n"
                             f"*Title:* {ticket['title']}\n"
                             f"*Description:* {ticket['description']}\n"
                             f"*Client Name:* {ticket['client_name']}\n"
@@ -545,8 +580,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Endpoint:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
-                            f"*Raised At:* {ticket['raised_at']}"
+                            f"*Raised By:* <@{ticket['raiser_id']}>\n"
+                            f"*Raised At:* {formatted_raised_at}"
                         )
                     )
                     break
@@ -575,7 +610,6 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     update_ticket(ticket_id, {"ttr_hours": f"{ttr_hours:.2f}", "resolved_by": resolver_name, "resolver_id": resolver_id})
                     blocks = [
                         {"type": "section", "text": {"type": "mrkdwn", "text": (
-                            f"*Ticket #{ticket['id']}*\n"
                             f"*Title:* {ticket['title']}\n"
                             f"*Description:* {ticket['description']}\n"
                             f"*Client Name:* {ticket['client_name']}\n"
@@ -584,8 +618,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Endpoint:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
-                            f"*Raised At:* {ticket['raised_at']}"
+                            f"*Raised By:* <@{ticket['raiser_id']}>\n"
+                            f"*Raised At:* {datetime.strptime(ticket['raised_at'], '%Y-%m-%dT%H:%M:%S.%f%z').strftime('%b %d, %Y, %-I:%M %p') if ticket.get('raised_at') else ''}"
                         )}},
                         {"type": "actions", "elements": [
                             {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']},
@@ -597,7 +631,6 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         ts=ticket["message_ts"],
                         blocks=blocks,
                         text=(
-                            f"*Ticket #{ticket['id']}*\n"
                             f"*Title:* {ticket['title']}\n"
                             f"*Description:* {ticket['description']}\n"
                             f"*Client Name:* {ticket['client_name']}\n"
@@ -606,13 +639,12 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Endpoint:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
-                            f"*Raised At:* {ticket['raised_at']}"
+                            f"*Raised By:* <@{ticket['raiser_id']}>\n"
+                            f"*Raised At:* {datetime.strptime(ticket['raised_at'], '%Y-%m-%dT%H:%M:%S.%f%z').strftime('%b %d, %Y, %-I:%M %p') if ticket.get('raised_at') else ''}"
                         )
                     )
                     summary_blocks = [
                         {"type": "section", "text": {"type": "mrkdwn", "text": (
-                            f"*Ticket #{ticket['id']}*\n"
                             f"*Title:* {ticket['title']}\n"
                             f"*Description:* {ticket['description']}\n"
                             f"*Client Name:* {ticket['client_name']}\n"
@@ -621,25 +653,25 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Endpoint:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
                             f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                            f"*Raised By:* <@{ticket['raiser_id']}> ({ticket['raised_by']})\n"
-                            f"*Raised At:* {ticket['raised_at']}"
+                            f"*Raised By:* <@{ticket['raiser_id']}>\n"
+                            f"*Raised At:* {datetime.strptime(ticket['raised_at'], '%Y-%m-%dT%H:%M:%S.%f%z').strftime('%b %d, %Y, %-I:%M %p') if ticket.get('raised_at') else ''}"
                         )}},
                         {"type": "section", "text": {"type": "mrkdwn", "text": (
                             f"*FRT:* {ticket.get('frt_hours', 'N/A')} hours\n"
                             f"*TTT:* {ticket.get('ttt_hours', 'N/A')} hours\n"
                             f"*TTR:* {ttr_hours:.2f} hours\n"
-                            f"*Resolved by:* <@{resolver_id}> ({resolver_name})"
+                            f"*Resolved by:* <@{resolver_id}>"
                         )}}
                     ]
                     client.web_client.chat_postMessage(
                         channel="C0958JC4GCE",
                         blocks=summary_blocks,
                         text=(
-                            f"Ticket #{ticket['id']} resolved.\n"
+                            f"Ticket resolved.\n"
                             f"FRT: {ticket.get('frt_hours', 'N/A')} hours, "
                             f"TTT: {ticket.get('ttt_hours', 'N/A')} hours, "
                             f"TTR: {ttr_hours:.2f} hours, "
-                            f"Resolved by: {resolver_name}"
+                            f"Resolved by: <@{resolver_id}>\n"
                         )
                     )
                     break
