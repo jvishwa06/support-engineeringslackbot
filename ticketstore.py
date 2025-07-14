@@ -24,39 +24,60 @@ def save_ticket(ticket: dict):
     except Exception as e:
         logging.error(f"Failed to save ticket to CSV: {e}. Ticket data: {ticket}")
 
-def get_all_tickets():
-    if not os.path.exists(TICKET_CSV):
-        return []
-    with open(TICKET_CSV, newline="") as f:
-        reader = csv.DictReader(f)
-        return list(reader)
-
 def update_ticket(ticket_id: str, updates: dict):
-    tickets = get_all_tickets()
-    updated = False
-    for ticket in tickets:
-        if ticket["id"] == ticket_id:
-            ticket.update(updates)
-            updated = True
-            break
-    if updated:
-        try:
+    try:
+        tickets = get_all_tickets()
+        updated = False
+        for ticket in tickets:
+            if ticket["id"] == ticket_id:
+                ticket.update(updates)
+                updated = True
+                break
+        if updated:
             with open(TICKET_CSV, mode="w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
                 writer.writeheader()
                 writer.writerows(tickets)
-        except Exception as e:
-            logging.error(f"Failed to update ticket in CSV: {e}")
-    else:
-        logging.warning(f"Ticket ID {ticket_id} not found for update")
+        else:
+            logging.warning(f"Ticket ID {ticket_id} not found for update")
+    except Exception as e:
+        logging.error(f"Error updating ticket {ticket_id}: {e}")
+
+def get_all_tickets():
+    try:
+        if not os.path.exists(TICKET_CSV):
+            return []
+        with open(TICKET_CSV, newline="") as f:
+            reader = csv.DictReader(f)
+            return list(reader)
+    except Exception as e:
+        logging.error(f"Failed to read tickets from CSV: {e}")
+        return []
 
 def get_escalation_members(product: str):
+    if not product:
+        logging.warning("Product is None in get_escalation_members")
+        return []
     try:
-        with open("escalationmatrix.csv", newline="") as f:
-            reader = csv.DictReader(f)
+        with open("escalationmatrix.csv", "r") as f:
+            reader = csv.reader(f)
             for row in reader:
-                if row["Product"].strip().lower() == product.strip().lower():
-                    return [row["L1"].strip(), row["L2"].strip(), row["L3"].strip()]
+                if row[0].strip().lower() == product.strip().lower():
+                    return [uid.strip() for uid in row[1:] if uid.strip()]
     except Exception as e:
-        logging.error(f"Failed to read escalation matrix: {e}")
+        logging.error(f"Error reading escalationmatrix.csv: {e}")
     return []
+
+def get_assignee_level(product: str, assignee_id: str):
+    try:
+        with open("escalationmatrix.csv", "r") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if row[0].strip().lower() == product.strip().lower():
+                    levels = [uid.strip() for uid in row[1:] if uid.strip()]
+                    if assignee_id in levels:
+                        idx = levels.index(assignee_id)
+                        return f"L{idx+1}", idx, levels
+    except Exception as e:
+        logging.error(f"Error reading escalationmatrix.csv for assignee level: {e}")
+    return None, None, []

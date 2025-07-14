@@ -10,7 +10,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from dotenv import load_dotenv
 from dateutil import parser
 import pytz
-from ticketstore import get_all_tickets, update_ticket, save_ticket, get_escalation_members
+from ticketstore import get_all_tickets, update_ticket, save_ticket, get_escalation_members, get_assignee_level
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 import requests
@@ -22,6 +22,7 @@ BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 PORT = int(os.getenv("PORT"))
 CHANNEL = os.getenv("CHANNEL")
+SUMMARY_CHANNEL = os.getenv("SUMMARY_CHANNEL")
 FRT_THRESHOLDS = {
     "High": float(os.getenv("FRT_HOURS_HIGH")),      # 3 min
     "Medium": float(os.getenv("FRT_HOURS_MEDIUM")),  # 5 min
@@ -33,7 +34,6 @@ JIRA_URL = os.getenv("JIRA_URL")
 JIRA_USER = os.getenv("JIRA_USER")
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")
 JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY")
-RESOLVED_SUMMARY_CHANNEL = os.getenv("RESOLVED_SUMMARY_CHANNEL")
 
 app = FastAPI()
 web_client = WebClient(token=BOT_TOKEN)
@@ -41,7 +41,7 @@ socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-def create_jira_ticket(ticket_id, summary, issue, fix, priority, resolved, triaged_by_name, ticket):
+def create_jira_ticket(summary, issue, fix, priority, resolved, ticket):
     if not all([JIRA_URL, JIRA_USER, JIRA_TOKEN, JIRA_PROJECT_KEY]):
         logging.error("Jira configuration missing.")
         return None
@@ -94,34 +94,6 @@ def create_jira_ticket(ticket_id, summary, issue, fix, priority, resolved, triag
         logging.error(f"Error creating Jira ticket: {e}")
     return None
 
-def get_escalation_members(product):
-    if not product:
-        logging.warning("Product is None in get_escalation_members")
-        return []
-    try:
-        with open("escalationmatrixid.csv", "r") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if row[0].strip().lower() == product.strip().lower():
-                    return [uid.strip() for uid in row[1:] if uid.strip()]
-    except Exception as e:
-        logging.error(f"Error reading escalationmatrixid.csv: {e}")
-    return []
-
-def get_assignee_level(product, assignee_id):
-    try:
-        with open("escalationmatrixid.csv", "r") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if row[0].strip().lower() == product.strip().lower():
-                    levels = [uid.strip() for uid in row[1:] if uid.strip()]
-                    if assignee_id in levels:
-                        idx = levels.index(assignee_id)
-                        return f"L{idx+1}", idx, levels
-    except Exception as e:
-        logging.error(f"Error reading escalationmatrixid.csv for assignee level: {e}")
-    return None, None, []
-
 def post_ticket_message(ticket):
     try:
         now = datetime.now(pytz.timezone("Asia/Kolkata"))
@@ -156,10 +128,7 @@ def post_ticket_message(ticket):
                 "value": ticket['id']
             })
         if action_elements:
-            blocks.append({
-                "type": "actions",
-                "elements": action_elements
-            })
+            blocks.append({"type": "actions","elements": action_elements})
         result = web_client.chat_postMessage(
             channel=CHANNEL,
             blocks=blocks,
@@ -183,21 +152,11 @@ def post_ticket_message(ticket):
             frt_hours = FRT_THRESHOLDS[ticket['criticality']]
             half_frt = max(frt_hours / 2, 0.0167)
             reminder_time = now + timedelta(hours=half_frt)
-            scheduler.add_job(
-                send_fr_reminder,
-                trigger=DateTrigger(run_date=reminder_time),
-                args=[ticket],
-                id=f"reminder_{ticket['id']}"
-            )
+            scheduler.add_job(send_fr_reminder,trigger=DateTrigger(run_date=reminder_time),args=[ticket],id=f"reminder_{ticket['id']}")
             logging.info(f"Scheduled FRT reminder for ticket #{ticket['id']} at {reminder_time}")
 
             escalation_time = now + timedelta(hours=frt_hours - FRT_ESCALATION_HOURS)
-            scheduler.add_job(
-                send_escalation_reminder,
-                trigger=DateTrigger(run_date=escalation_time),
-                args=[ticket],
-                id=f"escalation_{ticket['id']}"
-            )
+            scheduler.add_job(send_escalation_reminder,trigger=DateTrigger(run_date=escalation_time),args=[ticket],id=f"escalation_{ticket['id']}")
             logging.info(f"Scheduled escalation reminder for ticket #{ticket['id']} at {escalation_time}")
         else:
             logging.info(f"FRT already set for ticket #{ticket['id']}, not scheduling reminders.")
@@ -211,9 +170,7 @@ def send_fr_reminder(ticket):
         logging.info(f"FRT already set for ticket #{ticket['id']}, skipping FRT reminder.")
         return
     try:
-        reminder_text = (
-            f"⏰ <@{ticket['assignee_id']}>, please take a look and respond as soon as possible."
-        )
+        reminder_text = (f"⏰ <@{ticket['assignee_id']}>, please take a look and respond as soon as possible.")
         web_client.chat_postMessage(channel=CHANNEL,thread_ts=ticket['message_ts'],text=reminder_text)
         logging.info(f"Reminder sent for ticket #{ticket['id']} to <@{ticket['assignee_id']}>.")
     except Exception as e:
@@ -223,18 +180,20 @@ def send_escalation_reminder(ticket):
     if ticket.get('frt_hours'):
         logging.info(f"FRT already set for ticket #{ticket['id']}, skipping escalation reminder.")
         return
-    if not ticket.get("frt_hours"):
-        assignee_level, idx, levels = get_assignee_level(ticket["product"], ticket["assignee_id"])
-        if assignee_level and idx is not None and idx+1 < len(levels):
-            next_level_id = levels[idx+1]
-            reminder_text = (
-                f"🚨 <@{next_level_id}>, kindly check this matter. No response received so far."
-            )
-            web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=reminder_text)
-            logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to <@{next_level_id}>.")
-        else:
-            logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
-
+    try:
+        if not ticket.get("frt_hours"):
+            assignee_level, idx, levels = get_assignee_level(ticket["product"], ticket["assignee_id"])
+            if assignee_level and idx is not None and idx+1 < len(levels):
+                next_level_id = levels[idx+1]
+                reminder_text = (f"🚨 <@{next_level_id}>, kindly check this matter. No response received so far.")
+                web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=reminder_text)
+                logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to <@{next_level_id}>.")
+            else:
+                logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
+    except Exception as e:
+        logging.error(f"Error sending escalation reminder: {e}")
+        return
+    
 @socket_client.socket_mode_request_listeners.append
 def handle_events(client: SocketModeClient, req: SocketModeRequest):
     payload = req.payload
@@ -243,16 +202,13 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         logging.info("Received /ticketbot command")
         product_options = []
         try:
-            with open("escalationmatrixid.csv", "r") as f:
+            with open("escalationmatrix.csv", "r") as f:
                 reader = csv.reader(f)
                 next(reader, None)
                 for row in reader:
-                    product_options.append({
-                        "text": {"type": "plain_text", "text": row[0]},
-                        "value": row[0]
-                    })
+                    product_options.append({"text": {"type": "plain_text", "text": row[0]},"value": row[0]})
         except Exception as e:
-            logging.error(f"Error reading escalationmatrixid.csv: {e}")
+            logging.error(f"Error reading escalationmatrix.csv: {e}")
 
         client.web_client.views_open(
             trigger_id=payload["trigger_id"],
@@ -527,6 +483,16 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         fix = extract_plain_text_from_rich_text(fix_raw)
         priority = state["priority"]["value"]["selected_option"]["value"]
         resolved_date = state["resolved_date"]["value"].get("selected_date", "")
+        formatted_resolved_date = ""
+        if resolved_date:
+            try:
+                dt = datetime.strptime(resolved_date, "%Y-%m-%d")
+                formatted_resolved_date = dt.strftime("%b %d, %Y")
+            except Exception as e:
+                logging.error(f"Error formatting resolved_date: {e}")
+                formatted_resolved_date = resolved_date
+        else:
+            formatted_resolved_date = resolved_date
         escalate_to = state.get("escalate_to", {}).get("value", {}).get("selected_user", "")
         thread_ts = None
         triaged_by_id = payload["user"]["id"]
@@ -575,7 +541,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Issue:* {issue}\n"
                             f"How to fix:* {fix}\n"
                             f"*Priority:* {priority}\n"
-                            f"*When resolved:* {resolved_date}\n"
+                            f"*When resolved:* {formatted_resolved_date}\n"
                             f"*Triaged by:* <@{triaged_by_id}>\n"
                             f"*Assignee:* <@{ticket['assignee_id']}>"
                         ),
@@ -585,7 +551,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Issue:* {issue}\n"
                                 f"*How to fix:* {fix}\n"
                                 f"*Priority:* {priority}\n"
-                                f"*When resolved:* {resolved_date}\n"
+                                f"*When resolved:* {formatted_resolved_date}\n"
                                 f"*Triaged by:* <@{triaged_by_id}>\n"
                                 f"*Assignee:* <@{ticket['assignee_id']}>")}},
                             {"type": "actions", "elements": [
@@ -650,7 +616,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     priority = ticket.get("priority", "")
                     resolved = ticket.get("resolve_at", "")
                     triaged_by_name = ticket.get("triaged_by", "")
-                    jira_issue_key = create_jira_ticket(ticket_id, summary, issue, fix, priority, resolved, triaged_by_name, ticket)
+                    jira_issue_key = create_jira_ticket(summary, issue, fix, priority, resolved, ticket)
                     if jira_issue_key:
                         blocks = [
                             {"type": "section", "text": {"type": "mrkdwn", "text": (
@@ -752,11 +718,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Resolved At:* {now.strftime('%b %d, %Y, %-I:%M %p')}"
                         )
                     )
-                    client.web_client.chat_postMessage(
-                        channel=CHANNEL,
-                        thread_ts=ticket["message_ts"],
-                        text=f"Ticket marked as resolved by <@{user_id}>."
-                    )
+                    client.web_client.chat_postMessage(channel=CHANNEL,thread_ts=ticket["message_ts"],text=f"Ticket marked as resolved by <@{user_id}>.")
                     def get_display_name(user_id):
                         try:
                             info = client.web_client.users_info(user=user_id)
@@ -794,10 +756,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         f"TTT: {ticket.get('ttt_hours', '')} hours\n"
                         f"TTR: {ticket.get('ttr_hours', '')} hours"
                     )
-                    client.web_client.chat_postMessage(
-                        channel=RESOLVED_SUMMARY_CHANNEL,
-                        text=summary_text
-                    )
+                    client.web_client.chat_postMessage(channel=SUMMARY_CHANNEL,text=summary_text)
                     break
         except Exception as e:
             logging.error(f"Error handling resolved_button: {e}")
