@@ -10,10 +10,12 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from dotenv import load_dotenv
 from dateutil import parser
 import pytz
-from ticketstore import get_all_tickets, update_ticket, save_ticket, get_escalation_members, get_assignee_level
+from utils import get_all_tickets, update_ticket, save_ticket
+from gutils import get_all_products, get_escalation_members, get_assignee_level
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 import requests
+from jira import JIRA
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -40,6 +42,28 @@ web_client = WebClient(token=BOT_TOKEN)
 socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+jira_labels = []
+def fetch_jira_labels():
+    global jira_labels
+    if not (JIRA and JIRA_URL and JIRA_USER and JIRA_TOKEN and JIRA_PROJECT_KEY):
+        logging.warning("Jira config or JIRA lib missing, cannot fetch labels.")
+        return []
+    try:
+        jira_client = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
+        issues = jira_client.search_issues(f'project = {JIRA_PROJECT_KEY}', fields="labels", maxResults=1000)
+        label_set = set()
+        for issue in issues:
+            if issue.fields.labels:
+                label_set.update(issue.fields.labels)
+        jira_labels = sorted(list(label_set))
+        logging.info(f"Fetched {len(jira_labels)} Jira labels.")
+    except Exception as e:
+        logging.error(f"Error fetching Jira labels: {e}")
+        jira_labels = []
+    return jira_labels
+
+fetch_jira_labels()
 
 def create_jira_ticket(summary, issue, fix, priority, resolved, ticket):
     if not all([JIRA_URL, JIRA_USER, JIRA_TOKEN, JIRA_PROJECT_KEY]):
@@ -77,6 +101,17 @@ def create_jira_ticket(summary, issue, fix, priority, resolved, ticket):
         payload["fields"]["assignee"] = {"name": assignee}
     if due_date:
         payload["fields"]["duedate"] = due_date
+    labels = ticket.get('labels', [])
+    if isinstance(labels, str):
+        labels = [l.strip() for l in labels.split(',') if l.strip()]
+    elif not isinstance(labels, list):
+        labels = []
+    cleaned_labels = []
+    for label in labels:
+        label = label.strip().strip("[]'")
+        if label:
+            cleaned_labels.append(label)
+    payload["fields"]["labels"] = cleaned_labels if cleaned_labels else []
     try:
         response = requests.post(
             f"{JIRA_URL}/rest/api/2/issue",
@@ -202,13 +237,11 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         logging.info("Received /ticketbot command")
         product_options = []
         try:
-            with open("escalationmatrix.csv", "r") as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for row in reader:
-                    product_options.append({"text": {"type": "plain_text", "text": row[0]},"value": row[0]})
+            products = get_all_products()
+            for product in products:
+                product_options.append({"text": {"type": "plain_text", "text": product}, "value": product})
         except Exception as e:
-            logging.error(f"Error reading escalationmatrix.csv: {e}")
+            logging.error(f"Error reading products from Google Sheet: {e}")
 
         client.web_client.views_open(
             trigger_id=payload["trigger_id"],
@@ -416,6 +449,12 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
 
     if req.type == "interactive" and payload.get("actions", [{}])[0].get("action_id") == "triage_button":
         ticket_id = payload["actions"][0]["value"]
+        label_options = []
+        for label in jira_labels:
+            label_options.append({
+                "text": {"type": "plain_text", "text": label},
+                "value": label
+            })
         client.web_client.views_open(
             trigger_id=payload["trigger_id"],
             view={
@@ -433,7 +472,13 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         {"text": {"type": "plain_text", "text": "Low"}, "value": "Low"}
                     ]}},
                     {"type": "input", "block_id": "resolved_date", "label": {"type": "plain_text", "text": "When resolved (Date)"}, "element": {"type": "datepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select a date"}}},
-                    {"type": "input", "block_id": "escalate_to", "label": {"type": "plain_text", "text": "Assignee"}, "element": {"type": "users_select", "action_id": "value"}}
+                    {"type": "input", "block_id": "escalate_to", "label": {"type": "plain_text", "text": "Assignee"}, "element": {"type": "users_select", "action_id": "value"}},
+                    {"type": "input", "block_id": "labels", "label": {"type": "plain_text", "text": "Labels"}, "element": {
+                        "type": "multi_static_select",
+                        "action_id": "value",
+                        "options": label_options,
+                        "placeholder": {"type": "plain_text", "text": "Select or add labels"}
+                    }, "optional": True}
                 ],
                 "private_metadata": ticket_id
             }
@@ -494,6 +539,10 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         else:
             formatted_resolved_date = resolved_date
         escalate_to = state.get("escalate_to", {}).get("value", {}).get("selected_user", "")
+        labels = []
+        labels_block = state.get("labels", {}).get("value", {})
+        if "selected_options" in labels_block:
+            labels = [opt["value"] for opt in labels_block["selected_options"]]
         thread_ts = None
         triaged_by_id = payload["user"]["id"]
         try:
@@ -528,7 +577,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         "priority": priority,
                         "summary": summary,
                         "issue": issue,
-                        "fix": fix
+                        "fix": fix,
+                        "labels": labels
                     }
                     if escalate_to:
                         update_dict["escalate_to"] = escalate_to_name
@@ -731,6 +781,9 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     assignee_name = assigned_to_name
                     resolved_by_name = get_display_name(user_id)
                     formatted_raised_at = datetime.strptime(ticket["raised_at"], "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%b %d, %Y, %-I:%M %p") if ticket.get('raised_at') else ""
+                    updated_tickets = get_all_tickets()
+                    updated_ticket = next((t for t in updated_tickets if t["id"] == ticket_id), ticket)
+                    ttr_hours_val = updated_ticket.get("ttr_hours", "")
                     summary_text = (
                         f"Title: {ticket['title']}\n"
                         f"Description: {ticket['description']}\n"
@@ -754,7 +807,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         f"\n"
                         f"FRT: {ticket.get('frt_hours', '')} hours\n"
                         f"TTT: {ticket.get('ttt_hours', '')} hours\n"
-                        f"TTR: {ticket.get('ttr_hours', '')} hours"
+                        f"TTR: {ttr_hours_val} hours"
                     )
                     client.web_client.chat_postMessage(channel=SUMMARY_CHANNEL,text=summary_text)
                     break

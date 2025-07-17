@@ -1,2 +1,0 @@
-id,title,description,raised_by,raiser_id,raised_at,client_name,client_app_id,criticality,product,endpoint,assigned_to,assignee_id,frt_hours,message_ts,ttt_hours,triaged_by,triaged_id,triage_ts,ttr_hours,resolved_by,resolver_id,resolve_at,escalate_to,escalate_id,priority,summary,fix,issue
-20250714221432,x,x,Vishwa J,U093FFLQ5E2,2025-07-14T22:14:32.044462+05:30,x,x,Medium,ckyc,curl command,Vishwa J,U093FFLQ5E2,0.07,1752511473.020059,0.08,Vishwa J,U093FFLQ5E2,1752511775.410489,,,,2025-07-15,Anudeep,U093FFM9G22,Medium,X,X,X

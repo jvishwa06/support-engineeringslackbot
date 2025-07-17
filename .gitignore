@@ -1,6 +1,9 @@
-others/
-rocketenv/
+venv/
 .env
 .DS_Store
 __pycache__/
 service-account.json
+escalationmatrix.csv
+escalationmatrixmain.csv
+credentials.json
+tickets.csv
