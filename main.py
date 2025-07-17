@@ -10,8 +10,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from dotenv import load_dotenv
 from dateutil import parser
 import pytz
-from utils import get_all_tickets, update_ticket, save_ticket
-from gutils import get_all_products, get_escalation_members, get_assignee_level
+from utils import get_all_tickets, update_ticket, save_ticket, get_escalation_members, get_escalation_emails, get_slack_user_id_by_email
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 import requests
@@ -217,14 +216,25 @@ def send_escalation_reminder(ticket):
         return
     try:
         if not ticket.get("frt_hours"):
-            assignee_level, idx, levels = get_assignee_level(ticket["product"], ticket["assignee_id"])
-            if assignee_level and idx is not None and idx+1 < len(levels):
-                next_level_id = levels[idx+1]
-                reminder_text = (f"🚨 <@{next_level_id}>, kindly check this matter. No response received so far.")
-                web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=reminder_text)
-                logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to <@{next_level_id}>.")
+            product = ticket["product"]
+            assignee_id = ticket["assignee_id"]
+            escalation_emails = get_escalation_emails(product)
+            escalation_ids = []
+            for email in escalation_emails:
+                slack_id = get_slack_user_id_by_email(email, web_client)
+                if slack_id:
+                    escalation_ids.append(slack_id)
+            if assignee_id in escalation_ids:
+                idx = escalation_ids.index(assignee_id)
+                if idx+1 < len(escalation_ids):
+                    next_level_id = escalation_ids[idx+1]
+                    reminder_text = (f"🚨 <@{next_level_id}>, kindly check this matter. No response received so far.")
+                    web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=reminder_text)
+                    logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to <@{next_level_id}>.")
+                else:
+                    logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
             else:
-                logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
+                logging.info(f"Assignee <@{assignee_id}> not found in escalation list for product {product}.")
     except Exception as e:
         logging.error(f"Error sending escalation reminder: {e}")
         return
@@ -237,11 +247,13 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         logging.info("Received /ticketbot command")
         product_options = []
         try:
-            products = get_all_products()
-            for product in products:
-                product_options.append({"text": {"type": "plain_text", "text": product}, "value": product})
+            with open("escalationmatrixmail.csv", "r") as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                for row in reader:
+                    product_options.append({"text": {"type": "plain_text", "text": row[0]},"value": row[0]})
         except Exception as e:
-            logging.error(f"Error reading products from Google Sheet: {e}")
+            logging.error(f"Error reading escalationmatrixmail.csv: {e}")
 
         client.web_client.views_open(
             trigger_id=payload["trigger_id"],
@@ -417,7 +429,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Criticality:* {ticket['criticality']}\n"
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                                 f"*Raised By:* {raised_by_display}\n"
-                                f"*Raised At:* {formatted_raised_at}"
+                                f"*Raised At:* {ticket['raised_at']}"
                             )}},
                             {"type": "actions", "elements": [
                                 {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']}
@@ -437,7 +449,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Criticality:* {ticket['criticality']}\n"
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                                 f"*Raised By:* {raised_by_display}\n"
-                                f"*Raised At:* {formatted_raised_at}"
+                                f"*Raised At:* {ticket['raised_at']}"
                             )
                         )
                         return

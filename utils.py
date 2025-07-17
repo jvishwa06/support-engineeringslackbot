@@ -1,6 +1,7 @@
 import csv
 import os
 import logging
+from slack_sdk.errors import SlackApiError
 
 TICKET_CSV = "tickets.csv"
 
@@ -81,3 +82,27 @@ def get_assignee_level(product: str, assignee_id: str):
     except Exception as e:
         logging.error(f"Error reading escalationmatrix.csv for assignee level: {e}")
     return None, None, []
+
+def get_escalation_emails(product: str):
+    """Return escalation emails for a product from escalationmatrixmail.csv"""
+    try:
+        with open("escalationmatrixmail.csv", "r") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            for row in reader:
+                if row[0].strip().lower() == product.strip().lower():
+                    return [email.strip() for email in row[1:] if email.strip()]
+    except Exception as e:
+        logging.error(f"Error reading escalationmatrixmail.csv: {e}")
+    return []
+
+def get_slack_user_id_by_email(email, web_client):
+    """Return Slack user ID for a given email using Slack API"""
+    try:
+        response = web_client.users_lookupByEmail(email=email)
+        return response['user']['id']
+    except SlackApiError as e:
+        logging.error(f"Slack API error for email {email}: {e.response['error']}")
+    except Exception as e:
+        logging.error(f"Error looking up Slack user by email {email}: {e}")
+    return None
