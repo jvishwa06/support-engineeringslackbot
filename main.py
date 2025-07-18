@@ -132,19 +132,21 @@ def post_ticket_message(ticket):
     try:
         now = datetime.now(pytz.timezone("Asia/Kolkata"))
         formatted_time = now.strftime("%b %d, %Y, %-I:%M %p")
+        message_text = (
+            f"*Title        :* {ticket['title']}\n\n"
+            f"*Description  :* {ticket['description']}\n\n"
+            f"*Client Name  :* {ticket['client_name']}\n\n"
+            f"*Client App ID:* {ticket['client_app_id']}\n\n"
+            f"*Product      :* {ticket['product']}\n\n"
+            f"*Curl Command :* `{ticket['endpoint']}`\n\n"
+            f"*Criticality  :* {ticket['criticality']}\n\n"
+            f"*Assigned To  :* <@{ticket['assignee_id']}>\n\n"
+            f"*Raised By    :* <@{ticket['raiser_id']}>\n\n"
+            f"*Raised At    :* {formatted_time}\n\n"
+            f"*L0 Testing Done:* {ticket.get('l0_testing', '')}"
+        )
         blocks = [
-            {"type": "section", "text": {"type": "mrkdwn", "text": (
-                f"*Title:* {ticket['title']}\n"
-                f"*Description:* {ticket['description']}\n"
-                f"*Client Name:* {ticket['client_name']}\n"
-                f"*Client App ID:* {ticket['client_app_id']}\n"
-                f"*Product:* {ticket['product']}\n"
-                f"*Curl Command:* `{ticket['endpoint']}`\n"
-                f"*Criticality:* {ticket['criticality']}\n"
-                f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                f"*Raised By:* <@{ticket['raiser_id']}>\n"
-                f"*Raised At:* {formatted_time}"
-            )}}
+            {"type": "section", "text": {"type": "mrkdwn", "text": message_text}}
         ]
         action_elements = []
         if ticket.get('frt_hours'):
@@ -166,18 +168,7 @@ def post_ticket_message(ticket):
         result = web_client.chat_postMessage(
             channel=CHANNEL,
             blocks=blocks,
-            text=(
-                f"*Title:* {ticket['title']}\n"
-                f"*Description:* {ticket['description']}\n"
-                f"*Client Name:* {ticket['client_name']}\n"
-                f"*Client App ID:* {ticket['client_app_id']}\n"
-                f"*Product:* {ticket['product']}\n"
-                f"*Curl Command:* `{ticket['endpoint']}`\n"
-                f"*Criticality:* {ticket['criticality']}\n"
-                f"*Assigned To:* <@{ticket['assignee_id']}>\n"
-                f"*Raised By:* <@{ticket['raiser_id']}>\n"
-                f"*Raised At:* {formatted_time}"
-            )
+            text=message_text
         )
         logging.info(f"Ticket #{ticket['id']} posted to Slack with ts={result.get('ts')}")
         ticket['message_ts'] = result.get('ts')
@@ -264,19 +255,21 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         logging.info("Received /ticketbot command")
         product_options = []
         try:
-            with open("escalationmatrixmail.yml", "r") as f:
+            with open("EMatrixsample.yml", "r") as f:
                 data = yaml.safe_load(f)
                 for entry in data:
                     product_options.append({"text": {"type": "plain_text", "text": entry["product"]}, "value": entry["product"]})
         except Exception as e:
-            logging.error(f"Error reading escalationmatrixmail.yml: {e}")
+            logging.error(f"Error reading EMatrixsample.yml: {e}")
+        if not product_options:
+            product_options.append({"text": {"type": "plain_text", "text": "No products available"}, "value": "no_product"})
 
         client.web_client.views_open(
             trigger_id=payload["trigger_id"],
             view={
                 "type": "modal",
                 "callback_id": "submit_ticket",
-                "title": {"type": "plain_text", "text": "New Ticket"},
+                "title": {"type": "plain_text", "text": "Raise Ticket"},
                 "submit": {"type": "plain_text", "text": "Submit"},
                 "blocks": [
                     {"type": "input", "block_id": "title", "label": {"type": "plain_text", "text": "Title"}, "element": {"type": "plain_text_input", "action_id": "value"}},
@@ -294,14 +287,25 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 {"text": {"type": "plain_text", "text": "High"}, "value": "High"},
                                 {"text": {"type": "plain_text", "text": "Medium"}, "value": "Medium"},
                                 {"text": {"type": "plain_text", "text": "Low"}, "value": "Low"},
-                                
                             ]
                         }
                     },
-
                     {"type": "input", "block_id": "product", "label": {"type": "plain_text", "text": "Product"}, "element": {"type": "static_select", "action_id": "value", "options": product_options}},
                     {"type": "input", "block_id": "endpoint", "label": {"type": "plain_text", "text": "Curl Command"}, "element": {"type": "plain_text_input", "action_id": "value"}},
-                    {"type": "input", "block_id": "assignee", "label": {"type": "plain_text", "text": "Assign To"}, "element": {"type": "users_select", "action_id": "value"}}
+                    {"type": "input", "block_id": "assignee", "label": {"type": "plain_text", "text": "Assign To"}, "element": {"type": "users_select", "action_id": "value"}},
+                    {
+                        "type": "input",
+                        "block_id": "l0_testing",
+                        "label": {"type": "plain_text", "text": "Was L0 testing/debugging done already?"},
+                        "element": {
+                            "type": "static_select",
+                            "action_id": "value",
+                            "options": [
+                                {"text": {"type": "plain_text", "text": "Yes"}, "value": "Yes"},
+                                {"text": {"type": "plain_text", "text": "No"}, "value": "No"}
+                            ]
+                        }
+                    }
                 ]
             }
         )
@@ -377,7 +381,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         ticket = {}
         for field in [
             "id","title","description","raised_by","raiser_id","raised_by_email","raised_at","client_name","client_app_id","criticality","product","endpoint","assigned_to","assignee_id","assignee_email","frt_hours","message_ts",
-            "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id", "priority", "summary", "fix", "issue", "labels"
+            "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id", "priority", "summary", "fix", "issue", "labels", "l0_testing"
         ]:
             if field == "id":
                 ticket[field] = ticket_id
@@ -413,6 +417,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                 ticket[field] = ""
             elif field == "message_ts":
                 ticket[field] = ""
+            elif field == "l0_testing":
+                ticket[field] = state["l0_testing"]["value"]["selected_option"]["value"]
             else:
                 ticket[field] = ""
         logging.info(f"Saving ticket (pre-post): {ticket}")
@@ -868,7 +874,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         f"Raised By: @{raised_by_name}\n"
                         f"Raised At: {formatted_raised_at}\n"
                         f"Resolved By: @{resolved_by_name}\n"
-                        f"\n"
+                        f"____________________________________________________________________________\n"
                         f"Summary: {ticket.get('summary', '')}\n"
                         f"Issue: {ticket.get('issue', '')}\n"
                         f"How to fix: {ticket.get('fix', '')}\n"
@@ -876,7 +882,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         f"When resolved: {ticket.get('resolve_at', '')}\n"
                         f"Triaged by: @{triaged_by_name}\n"
                         f"Assignee: @{assignee_name}\n"
-                        f"\n"
+                        f"____________________________________________________________________________\n"
                         f"FRT: {ticket.get('frt_hours', '')} hours\n"
                         f"TTT: {ticket.get('ttt_hours', '')} hours\n"
                         f"TTR: {ttr_hours_val} hours"

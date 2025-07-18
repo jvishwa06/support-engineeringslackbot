@@ -7,7 +7,7 @@ TICKET_CSV = "tickets.csv"
 
 FIELDNAMES = [
     "id","title","description","raised_by","raiser_id","raised_by_email","raised_at","client_name","client_app_id","criticality","product","endpoint","assigned_to","assignee_id","assignee_email","frt_hours","message_ts",
-    "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id", "priority", "summary", "fix", "issue", "labels"
+    "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id", "priority", "summary", "fix", "issue", "labels", "l0_testing"
 ]
 
 def save_ticket(ticket: dict):
@@ -60,11 +60,11 @@ def get_escalation_members(product: str):
         logging.warning("Product is None in get_escalation_members")
         return []
     try:
-        with open("escalationmatrixmail.yml", "r") as f:
+        with open("EMatrixsample.yml", "r") as f:
             data = yaml.safe_load(f)
             for entry in data:
                 if entry["product"].strip().lower() == product.strip().lower():
                     return [entry.get(level) for level in ["L1", "L2", "L3"] if entry.get(level)]
     except Exception as e:
-        logging.error(f"Error reading escalationmatrixmail.yml: {e}")
+        logging.error(f"Error reading EMatrixsample.yml: {e}")
     return []
