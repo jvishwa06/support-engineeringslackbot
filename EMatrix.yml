@@ -1,0 +1,44 @@
+- Product: india-kyc (India OCR)
+  L1: sanskar.s@hyperverge.co
+  L2: anand.b@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: ckyc (CKYC)
+  L1: murchana.adhikary@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: karza-kyc-wrapper (Ind-Verify DB Check)
+  L1: sanskar.s@hyperverge.co
+  L2: anand.b@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: karza-kyc-wrapper (Digilocker)
+  L1: harish.kumar@hyperverge.co
+  L2: sanskar.s@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: FRaaS (FRaaS)
+  L1: tanay.t@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: india-offline-aadhaar-apis (Aadhaar Scrapper)
+  L1: sanskar.s@hyperverge.co
+  L2: anand.b@hyperverge.co
+  L3: sanchit@hyperverge.co
+- Product: '*-hyperturing (HyperTuring)'
+  L1: anand.b@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: ind.faceid (Global Face)
+  L1: tanay.t@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: apac-face (Global Face)
+  L1: tanay.t@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: zaf-face (Global Face)
+  L1: tanay.t@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co
+- Product: idn-face (Global Face)
+  L1: tanay.t@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co

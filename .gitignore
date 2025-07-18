@@ -2,9 +2,7 @@ venv/
 .env
 .DS_Store
 __pycache__/
-service-account.json
-escalationmatrix.csv
-escalationmatrixmain.csv
+EMatrixsample.yml
 credentials.json
 tickets.csv
 others/

@@ -1,6 +1,6 @@
 import os
 import logging
-import csv
+import yaml
 from datetime import datetime, timedelta
 from fastapi import FastAPI
 from slack_sdk.web import WebClient
@@ -10,7 +10,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from dotenv import load_dotenv
 from dateutil import parser
 import pytz
-from utils import get_all_tickets, update_ticket, save_ticket, get_escalation_members, get_escalation_emails, get_slack_user_id_by_email
+from utils import get_all_tickets, update_ticket, save_ticket, get_escalation_members
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 import requests
@@ -209,6 +209,25 @@ def send_fr_reminder(ticket):
         logging.info(f"Reminder sent for ticket #{ticket['id']} to <@{ticket['assignee_id']}>.")
     except Exception as e:
         logging.error(f"Error sending FRT reminder: {e}")
+        
+def get_slack_user_by_email(email):
+    try:
+        resp = web_client.users_lookupByEmail(email=email)
+        user = resp.get("user", {})
+        user_id = user.get("id", "")
+        display_name = user.get("real_name") or user.get("profile", {}).get("display_name") or email
+        return user_id, display_name
+    except Exception as e:
+        logging.error(f"Error looking up Slack user for email {email}: {e}")
+        return "", email
+    
+def is_valid_curl_command(cmd):
+    cmd = cmd.strip()
+    if not cmd.lower().startswith("curl "):
+        return False
+    import re
+    url_pattern = r"https?://[\w\.-]+(?:/[\w\.-]*)*"
+    return bool(re.search(url_pattern, cmd))
 
 def send_escalation_reminder(ticket):
     if ticket.get('frt_hours'):
@@ -217,43 +236,40 @@ def send_escalation_reminder(ticket):
     try:
         if not ticket.get("frt_hours"):
             product = ticket["product"]
-            assignee_id = ticket["assignee_id"]
-            escalation_emails = get_escalation_emails(product)
-            escalation_ids = []
-            for email in escalation_emails:
-                slack_id = get_slack_user_id_by_email(email, web_client)
-                if slack_id:
-                    escalation_ids.append(slack_id)
-            if assignee_id in escalation_ids:
-                idx = escalation_ids.index(assignee_id)
-                if idx+1 < len(escalation_ids):
-                    next_level_id = escalation_ids[idx+1]
-                    reminder_text = (f"🚨 <@{next_level_id}>, kindly check this matter. No response received so far.")
+            assignee_email = ticket.get("assignee_email")
+            escalation_emails = get_escalation_members(product)
+            if assignee_email in escalation_emails:
+                idx = escalation_emails.index(assignee_email)
+                if idx+1 < len(escalation_emails):
+                    next_level_email = escalation_emails[idx+1]
+                    user_id, display_name = get_slack_user_by_email(next_level_email)
+                    if user_id:
+                        reminder_text = f"\U0001F6A8 <@{user_id}>, kindly check this matter. No response received so far."
+                    else:
+                        reminder_text = f"\U0001F6A8 @{display_name}, kindly check this matter. No response received so far."
                     web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=reminder_text)
-                    logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to <@{next_level_id}>.")
+                    logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to {display_name}.")
                 else:
                     logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
             else:
-                logging.info(f"Assignee <@{assignee_id}> not found in escalation list for product {product}.")
+                logging.info(f"Assignee {assignee_email} not found in escalation list for product {product}.")
     except Exception as e:
         logging.error(f"Error sending escalation reminder: {e}")
         return
-    
+
 @socket_client.socket_mode_request_listeners.append
 def handle_events(client: SocketModeClient, req: SocketModeRequest):
     payload = req.payload
-
     if req.type == "slash_commands" and payload.get("command") == "/ticketbot":
         logging.info("Received /ticketbot command")
         product_options = []
         try:
-            with open("escalationmatrixmail.csv", "r") as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for row in reader:
-                    product_options.append({"text": {"type": "plain_text", "text": row[0]},"value": row[0]})
+            with open("escalationmatrixmail.yml", "r") as f:
+                data = yaml.safe_load(f)
+                for entry in data:
+                    product_options.append({"text": {"type": "plain_text", "text": entry["product"]}, "value": entry["product"]})
         except Exception as e:
-            logging.error(f"Error reading escalationmatrixmail.csv: {e}")
+            logging.error(f"Error reading escalationmatrixmail.yml: {e}")
 
         client.web_client.views_open(
             trigger_id=payload["trigger_id"],
@@ -270,14 +286,15 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     {
                         "type": "input",
                         "block_id": "criticality",
-                        "label": {"type": "plain_text", "text": "Criticality"},
+                        "label": {"type": "plain_text", "text": "Priority"},
                         "element": {
                             "type": "static_select",
                             "action_id": "value",
                             "options": [
-                                {"text": {"type": "plain_text", "text": "Low"}, "value": "Low"},
+                                {"text": {"type": "plain_text", "text": "High"}, "value": "High"},
                                 {"text": {"type": "plain_text", "text": "Medium"}, "value": "Medium"},
-                                {"text": {"type": "plain_text", "text": "High"}, "value": "High"}
+                                {"text": {"type": "plain_text", "text": "Low"}, "value": "Low"},
+                                
                             ]
                         }
                     },
@@ -295,6 +312,18 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         state = payload["view"]["state"]["values"]
         endpoint = state["endpoint"]["value"]["value"].strip()
 
+        if not is_valid_curl_command(endpoint):
+            client.send_socket_mode_response(SocketModeResponse(
+                envelope_id=req.envelope_id,
+                payload={
+                    "response_action": "errors",
+                    "errors": {
+                        "endpoint": "Please enter a valid curl command starting with 'curl' and containing a URL."
+                    }
+                }
+            ))
+            return
+
         ticket_id = datetime.now().strftime("%Y%m%d%H%M%S")
         raised_at = datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()
         user_id = payload["user"]["id"]
@@ -302,17 +331,27 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         try:
             raised_by_info = client.web_client.users_info(user=user_id)
             raised_by_name = raised_by_info["user"].get("real_name") or raised_by_info["user"].get("profile", {}).get("display_name") or user_id
+            raised_by_email = raised_by_info["user"].get("profile", {}).get("email", "")
         except Exception as e:
-            logging.error(f"Error fetching raised_by name: {e}")
+            logging.error(f"Error fetching raised_by name/email: {e}")
             raised_by_name = user_id
+            raised_by_email = ""
         try:
             assignee_id = state["assignee"]["value"]["selected_user"]
             assigned_to_info = client.web_client.users_info(user=assignee_id)
             assigned_to_name = assigned_to_info["user"].get("real_name") or assigned_to_info["user"].get("profile", {}).get("display_name") or assignee_id
+            assigned_to_email = assigned_to_info["user"].get("profile", {}).get("email", "")
         except Exception as e:
-            logging.error(f"Error fetching assigned_to name: {e}")
+            logging.error(f"Error fetching assigned_to name/email: {e}")
             assigned_to_name = assignee_id
-
+            assigned_to_email = ""
+        description_block = state["description"]["value"]
+        if "rich_text_value" in description_block:
+            description_raw = description_block["rich_text_value"]
+        elif "value" in description_block:
+            description_raw = description_block["value"]
+        else:
+            description_raw = ""
         def extract_plain_text_from_rich_text(rich_text):
             if isinstance(rich_text, str):
                 return rich_text
@@ -333,35 +372,49 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         text += section.get('text', '')
                 return text
             return str(rich_text)
-
-        description_block = state["description"]["value"]
-        if "rich_text_value" in description_block:
-            description_raw = description_block["rich_text_value"]
-        elif "value" in description_block:
-            description_raw = description_block["value"]
-        else:
-            description_raw = ""
         description = extract_plain_text_from_rich_text(description_raw)
 
-        ticket = {
-            "id": ticket_id,
-            "title": state["title"]["value"]["value"],
-            "description": description,
-            "raised_by": raised_by_name,
-            "raiser_id": user_id,
-            "raised_at": raised_at,
-            "client_name": state["client_name"]["value"]["value"],
-            "client_app_id": state["client_app_id"]["value"]["value"],
-            "criticality": state["criticality"]["value"]["selected_option"]["value"],
-            "product": state["product"]["value"]["selected_option"]["value"],
-            "endpoint": endpoint,
-            "assigned_to": assigned_to_name,
-            "assignee_id": assignee_id,
-            "frt_hours": "",
-            "message_ts": "",
-            "priority": ""
-        }
-
+        ticket = {}
+        for field in [
+            "id","title","description","raised_by","raiser_id","raised_by_email","raised_at","client_name","client_app_id","criticality","product","endpoint","assigned_to","assignee_id","assignee_email","frt_hours","message_ts",
+            "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id", "priority", "summary", "fix", "issue", "labels"
+        ]:
+            if field == "id":
+                ticket[field] = ticket_id
+            elif field == "title":
+                ticket[field] = state["title"]["value"]["value"]
+            elif field == "description":
+                ticket[field] = description
+            elif field == "raised_by":
+                ticket[field] = raised_by_name
+            elif field == "raiser_id":
+                ticket[field] = user_id
+            elif field == "raised_by_email":
+                ticket[field] = raised_by_email
+            elif field == "raised_at":
+                ticket[field] = raised_at
+            elif field == "client_name":
+                ticket[field] = state["client_name"]["value"]["value"]
+            elif field == "client_app_id":
+                ticket[field] = state["client_app_id"]["value"]["value"]
+            elif field == "criticality":
+                ticket[field] = state["criticality"]["value"]["selected_option"]["value"]
+            elif field == "product":
+                ticket[field] = state["product"]["value"]["selected_option"]["value"]
+            elif field == "endpoint":
+                ticket[field] = endpoint
+            elif field == "assigned_to":
+                ticket[field] = assigned_to_name
+            elif field == "assignee_id":
+                ticket[field] = assignee_id
+            elif field == "assignee_email":
+                ticket[field] = assigned_to_email
+            elif field == "frt_hours":
+                ticket[field] = ""
+            elif field == "message_ts":
+                ticket[field] = ""
+            else:
+                ticket[field] = ""
         logging.info(f"Saving ticket (pre-post): {ticket}")
         ticket["message_ts"] = post_ticket_message(ticket)
         save_ticket(ticket)
@@ -380,17 +433,19 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     logging.info(f"Checking ticket #{ticket['id']} with thread_ts={thread_ts}")
                     try:
                         user_info = client.web_client.users_info(user=user)
+                        responder_email = user_info["user"].get("profile", {}).get("email", "")
                         responder_name = user_info["user"].get("real_name") or user_info["user"].get("profile", {}).get("display_name") or user
                     except Exception as e:
-                        logging.error(f"Error fetching responder name: {e}")
+                        logging.error(f"Error fetching responder name/email: {e}")
                         responder_name = user
-                    escalation_ids = get_escalation_members(ticket["product"])
-                    if user in escalation_ids and not ticket.get("frt_hours"):
+                        responder_email = ""
+                    escalation_emails = get_escalation_members(ticket["product"])
+                    if responder_email in escalation_emails and not ticket.get("frt_hours"):
                         raised_at = parser.isoparse(ticket["raised_at"])
                         now = datetime.now(pytz.timezone("Asia/Kolkata"))
                         frt = (now - raised_at).total_seconds() / 3600
                         update_ticket(ticket["id"], {"frt_hours": f"{frt:.2f}"})
-                        logging.info(f"✅ FRT for ticket #{ticket['id']} set to {frt:.2f} hours by <@{user}> ({responder_name})")
+                        logging.info(f"✅ FRT for ticket #{ticket['id']} set to {frt:.2f} hours by {responder_email} ({responder_name})")
                         try:
                             scheduler.remove_job(f"reminder_{ticket['id']}")
                         except Exception as e:
@@ -454,7 +509,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         )
                         return
                     else:
-                        logging.info(f"User <@{user}> ({responder_name}) is not an escalation member for ticket #{ticket['id']}. FRT will not be set.")
+                        logging.info(f"User {responder_email} ({responder_name}) is not an escalation member for ticket #{ticket['id']}. FRT will not be set.")
                         return
 
         client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
@@ -466,6 +521,11 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
             label_options.append({
                 "text": {"type": "plain_text", "text": label},
                 "value": label
+            })
+        if not label_options:
+            label_options.append({
+                "text": {"type": "plain_text", "text": "No labels available"},
+                "value": "no_label"
             })
         client.web_client.views_open(
             trigger_id=payload["trigger_id"],

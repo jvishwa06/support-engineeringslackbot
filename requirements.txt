@@ -6,5 +6,5 @@ apscheduler
 python-dateutil
 pytz
 requests
-gspread
 jira
+pyyaml
