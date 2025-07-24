@@ -60,11 +60,11 @@ def get_escalation_members(product: str):
         logging.warning("Product is None in get_escalation_members")
         return []
     try:
-        with open("EMatrixsample.yml", "r") as f:
+        with open("EMatrix.yml", "r") as f:
             data = yaml.safe_load(f)
             for entry in data:
                 if entry["product"].strip().lower() == product.strip().lower():
                     return [entry.get(level) for level in ["L1", "L2", "L3"] if entry.get(level)]
     except Exception as e:
-        logging.error(f"Error reading EMatrixsample.yml: {e}")
+        logging.error(f"Error reading EMatrix.yml: {e}")
     return []
