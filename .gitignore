@@ -1,9 +1,7 @@
-venv/
+environment/
 .env
 .DS_Store
 __pycache__/
-EMatrixsample.yml
 EMatrix.yml
-credentials.json
 tickets.csv
 others/

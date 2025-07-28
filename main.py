@@ -25,11 +25,12 @@ PORT = int(os.getenv("PORT"))
 CHANNEL = os.getenv("CHANNEL")
 SUMMARY_CHANNEL = os.getenv("SUMMARY_CHANNEL")
 FRT_THRESHOLDS = {
-    "High": float(os.getenv("FRT_HOURS_HIGH")),      # 3 min
-    "Medium": float(os.getenv("FRT_HOURS_MEDIUM")),  # 5 min
-    "Low": float(os.getenv("FRT_HOURS_LOW"))         # 10 min
+    "Critical": float(os.getenv("FRT_HOURS_CRITICAL")),
+    "High": float(os.getenv("FRT_HOURS_HIGH")),
+    "Medium": float(os.getenv("FRT_HOURS_MEDIUM")),
+    "Low": float(os.getenv("FRT_HOURS_LOW"))
 }
-FRT_ESCALATION_HOURS = float(os.getenv("FRT_ESCALATION_HOURS")) #1 min
+FRT_ESCALATION_HOURS = float(os.getenv("FRT_ESCALATION_HOURS"))
 
 JIRA_URL = os.getenv("JIRA_URL")
 JIRA_USER = os.getenv("JIRA_USER")
@@ -109,7 +110,22 @@ def create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter
             logging.warning(f"Could not parse due date: {resolved}, error: {e}")
     assignee_email = ticket.get('assignee_email', '')
     jira_account_id = get_jira_account_id_by_email(assignee_email) if assignee_email else None
-    reporter_account_id = get_jira_account_id_by_slack_id(reporter_id) if reporter_id else None
+    logging.info(f"Jira assignee_email: {assignee_email}, jira_account_id: {jira_account_id}")
+    if not jira_account_id:
+        logging.warning(f"Assignee Jira account not found for email: {assignee_email}")
+    reporter_account_id = None
+    if reporter_id:
+        try:
+            user_info = web_client.users_info(user=reporter_id)
+            reporter_email = user_info["user"].get("profile", {}).get("email", "")
+            if reporter_email:
+                reporter_account_id = get_jira_account_id_by_email(reporter_email)
+                if not reporter_account_id:
+                    logging.warning(f"Reporter Jira account not found for email: {reporter_email}")
+            else:
+                logging.warning(f"Reporter email not found for Slack ID: {reporter_id}")
+        except Exception as e:
+            logging.error(f"Error getting reporter Jira accountId for Slack ID {reporter_id}: {e}")
     slack_message_link = f"https://slack.com/app_redirect?channel={CHANNEL}&message_ts={ticket.get('message_ts', '')}"
     endpoint_raw = ticket.get('endpoint', '')
     endpoint_clean = clean_endpoint(endpoint_raw)
@@ -133,7 +149,7 @@ def create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter
     }
     payload["fields"] = {k: v for k, v in payload["fields"].items() if v is not None}
     if jira_account_id:
-        payload["fields"]["assignee"] = {"id": jira_account_id}
+        payload["fields"]["assignee"] = {"accountId": jira_account_id}
     if reporter_account_id:
         payload["fields"]["reporter"] = {"id": reporter_account_id}
     if due_date:
@@ -323,6 +339,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             "type": "static_select",
                             "action_id": "value",
                             "options": [
+                                {"text": {"type": "plain_text", "text": "Critical"}, "value": "Critical"},
                                 {"text": {"type": "plain_text", "text": "High"}, "value": "High"},
                                 {"text": {"type": "plain_text", "text": "Medium"}, "value": "Medium"},
                                 {"text": {"type": "plain_text", "text": "Low"}, "value": "Low"},
@@ -547,7 +564,14 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             ]}
                         ]
                         raised_by_display = ticket.get('raised_by', ticket.get('raiser_id', ''))
-                        formatted_raised_at = datetime.strptime(ticket["raised_at"], "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%b %d, %Y, %-I:%M %p") if ticket.get('raised_at') else ""
+                        formatted_raised_at = ''
+                        if ticket.get('raised_at'):
+                            try:
+                                dt = parser.isoparse(ticket['raised_at'])
+                                formatted_raised_at = dt.strftime('%b %d, %Y, %-I:%M %p')
+                            except Exception as e:
+                                logging.error(f"Error formatting raised_at: {e}")
+                                formatted_raised_at = ticket['raised_at']
                         blocks = [
                             {"type": "section", "text": {"type": "mrkdwn", "text": (
                                 f"*Title:* {ticket['title']}\n"
@@ -560,7 +584,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*L0 Testing Done:* {ticket.get('l0_testing', '')}\n"
                                 f"*Assigned To:* <@{ticket['assignee_id']}>\n"
                                 f"*Raised By:* {raised_by_display}\n"
-                                f"*Raised At:* {ticket['raised_at']}"
+                                f"*Raised At:* {formatted_raised_at}"
                             )}},
                             {"type": "actions", "elements": [
                                 {"type": "button", "text": {"type": "plain_text", "text": "Triage"}, "action_id": "triage_button", "value": ticket['id']}
@@ -622,7 +646,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         {"text": {"type": "plain_text", "text": "Low"}, "value": "Low"},
                         {"text": {"type": "plain_text", "text": "None"}, "value": "None"}
                     ]}},
-                    {"type": "input", "block_id": "resolved_date", "label": {"type": "plain_text", "text": "When resolved (Date)"}, "element": {"type": "datepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select a date"}}},
+                    {"type": "input", "block_id": "resolved_date", "label": {"type": "plain_text", "text": "Date of resolution"}, "element": {"type": "datepicker", "action_id": "value", "placeholder": {"type": "plain_text", "text": "Select a date"}}},
                     {"type": "input", "block_id": "escalate_to", "label": {"type": "plain_text", "text": "Assignee"}, "element": {"type": "users_select", "action_id": "value"}},
                     {"type": "input", "block_id": "labels", "label": {"type": "plain_text", "text": "Labels (select)"}, "element": {
                         "type": "multi_static_select",
@@ -718,13 +742,16 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     ttt_hours = (now - raised_at).total_seconds() / 3600
                     escalate_to_id = escalate_to
                     escalate_to_name = ""
+                    escalate_to_email = ""
                     if escalate_to:
                         try:
                             escalate_to_info = client.web_client.users_info(user=escalate_to)
                             escalate_to_name = escalate_to_info["user"].get("real_name") or escalate_to_info["user"].get("profile", {}).get("display_name") or escalate_to
+                            escalate_to_email = escalate_to_info["user"].get("profile", {}).get("email", "")
                         except Exception as e:
-                            logging.error(f"Error fetching escalate_to name: {e}")
+                            logging.error(f"Error fetching escalate_to name/email: {e}")
                             escalate_to_name = escalate_to
+                            escalate_to_email = ""
                     update_dict = {
                         "ttt_hours": f"{ttt_hours:.2f}",
                         "triaged_by": triaged_by_name,
@@ -734,7 +761,10 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         "summary": summary,
                         "issue": issue,
                         "fix": fix,
-                        "labels": labels
+                        "labels": labels,
+                        "assigned_to": escalate_to_name,
+                        "assignee_id": escalate_to_id,
+                        "assignee_email": escalate_to_email
                     }
                     if escalate_to:
                         update_dict["escalate_to"] = escalate_to_name
@@ -747,9 +777,9 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Issue:* {issue}\n"
                             f"How to fix:* {fix}\n"
                             f"*Priority:* {priority}\n"
-                            f"*When resolved:* {formatted_resolved_date}\n"
+                            f"*Date of resolution:* {formatted_resolved_date}\n"
                             f"*Triaged by:* <@{triaged_by_id}>\n"
-                            f"*Assignee:* <@{ticket['assignee_id']}>"
+                            f"*Assignee:* <@{escalate_to_id}>"
                         ),
                         blocks=[
                             {"type": "section", "text": {"type": "mrkdwn", "text": (
@@ -757,9 +787,9 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Issue:* {issue}\n"
                                 f"*How to fix:* {fix}\n"
                                 f"*Priority:* {priority}\n"
-                                f"*When resolved:* {formatted_resolved_date}\n"
+                                f"*Date of resolution:* {formatted_resolved_date}\n"
                                 f"*Triaged by:* <@{triaged_by_id}>\n"
-                                f"*Assignee:* <@{ticket['assignee_id']}>")}},
+                                f"*Assignee:* <@{escalate_to_id}>")}},
                             {"type": "actions", "elements": [
                                 {"type": "button", "text": {"type": "plain_text", "text": "Create Jira Ticket"}, "action_id": "create_jira_button", "value": ticket_id}
                             ]}
@@ -777,7 +807,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Product:* {ticket['product']}\n"
                             f"*Curl Command:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
-                            f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                            f"*Assigned To:* <@{escalate_to_id}>\n"
                             f"*Raised By:* <@{ticket['raiser_id']}>\n"
                             f"*Raised At:* {formatted_raised_at}"
                         )}},
@@ -798,7 +828,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Product:* {ticket['product']}\n"
                             f"*Curl Command:* `{ticket['endpoint']}`\n"
                             f"*Criticality:* {ticket['criticality']}\n"
-                            f"*Assigned To:* <@{ticket['assignee_id']}>\n"
+                            f"*Assigned To:* <@{escalate_to_id}>\n"
                             f"*Raised By:* <@{ticket['raiser_id']}>\n"
                             f"*Raised At:* {formatted_raised_at}"
                         )
@@ -814,53 +844,52 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         user_id = payload["user"]["id"]
         try:
             all_tickets = get_all_tickets()
-            for ticket in all_tickets:
-                if ticket["id"] == ticket_id:
-                    summary = ticket.get("summary", "")
-                    issue = ticket.get("issue", "")
-                    fix = ticket.get("fix", "")
-                    priority = ticket.get("priority", "")
-                    resolved = ticket.get("resolve_at", "")
-                    triaged_by_name = ticket.get("triaged_by", "")
-                    jira_issue_key = create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter_id=user_id)
-                    if jira_issue_key:
-                        jira_link = f"{JIRA_URL}/browse/{jira_issue_key}"
-                        blocks = [
-                            {"type": "section", "text": {"type": "mrkdwn", "text": (
-                                f"*Summary:* {summary}\n"
-                                f"*Issue:* {issue}\n"
-                                f"*How to fix:* {fix}\n"
-                                f"*Priority:* {priority}\n"
-                                f"*When resolved:* {resolved}\n"
-                                f"*Triaged by:* <@{ticket.get('triaged_id', user_id)}>\n"
-                                f"*Assignee:* <@{ticket['assignee_id']}>\n"
-                                f"*Jira Ticket:* <{jira_link}|{jira_issue_key}>"
-                            )}},
-                            {"type": "actions", "elements": [
-                                {"type": "button", "text": {"type": "plain_text", "text": "✅ Jira Created"}, "action_id": "noop", "value": ticket_id, "style": "primary"}
-                            ]}
-                        ]
-                        client.web_client.chat_update(
-                            channel=CHANNEL,
-                            ts=ticket.get("triage_ts"),
-                            blocks=blocks,
-                            text=(
-                                f"*Summary:* {summary}\n"
-                                f"*Issue:* {issue}\n"
-                                f"*How to fix:* {fix}\n"
-                                f"*Priority:* {priority}\n"
-                                f"*When resolved:* {resolved}\n"
-                                f"*Triaged by:* <@{ticket.get('triaged_id', user_id)}>\n"
-                                f"*Assignee:* <@{ticket['assignee_id']}>"
-                                f"*Jira Ticket:* {jira_link}"
-                            )
+            ticket = next((t for t in all_tickets if t["id"] == ticket_id), None)
+            if ticket:
+                summary = ticket.get("summary", "")
+                issue = ticket.get("issue", "")
+                fix = ticket.get("fix", "")
+                priority = ticket.get("priority", "")
+                resolved = ticket.get("resolve_at", "")
+                triaged_by_name = ticket.get("triaged_by", "")
+                jira_issue_key = create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter_id=user_id)
+                if jira_issue_key:
+                    jira_link = f"{JIRA_URL}/browse/{jira_issue_key}"
+                    blocks = [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": (
+                            f"*Summary:* {summary}\n"
+                            f"*Issue:* {issue}\n"
+                            f"*How to fix:* {fix}\n"
+                            f"*Priority:* {priority}\n"
+                            f"*Date of resolution:* {resolved}\n"
+                            f"*Triaged by:* <@{ticket.get('triaged_id', user_id)}>\n"
+                            f"*Assignee:* <@{ticket['assignee_id']}>\n"
+                            f"*Jira Ticket:* <{jira_link}|{jira_issue_key}>"
+                        )}},
+                        {"type": "actions", "elements": [
+                            {"type": "button", "text": {"type": "plain_text", "text": "✅ Jira Created"}, "action_id": "noop", "value": ticket_id, "style": "primary"}
+                        ]}
+                    ]
+                    client.web_client.chat_update(
+                        channel=CHANNEL,
+                        ts=ticket.get("triage_ts"),
+                        blocks=blocks,
+                        text=(
+                            f"*Summary:* {summary}\n"
+                            f"*Issue:* {issue}\n"
+                            f"*How to fix:* {fix}\n"
+                            f"*Priority:* {priority}\n"
+                            f"*Date of resolution:* {resolved}\n"
+                            f"*Triaged by:* <@{ticket.get('triaged_id', user_id)}>\n"
+                            f"*Assignee:* <@{ticket['assignee_id']}>\n"
+                            f"*Jira Ticket:* {jira_link}"
                         )
-                        client.web_client.chat_postMessage(
-                            channel=CHANNEL,
-                            thread_ts=ticket.get("triage_ts"),
-                            text=f"Jira ticket created: <{jira_link}|{jira_issue_key}>"
-                        )
-                    break
+                    )
+                    client.web_client.chat_postMessage(
+                        channel=CHANNEL,
+                        thread_ts=ticket.get("triage_ts"),
+                        text=f"Jira ticket created: <{jira_link}|{jira_issue_key}>"
+                    )
         except Exception as e:
             logging.error(f"Error handling create_jira_button: {e}")
         client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
