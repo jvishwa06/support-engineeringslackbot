@@ -1,48 +1,68 @@
-- product: india-kyc (India OCR)
-  L1: sanskar.s@hyperverge.co
-  L2: anand.b@hyperverge.co
+- product: test-product
+  L1: karthikeyan.s@hyperverge.co
+  L2: vishwa.j@hyperverge.co
+  L3: karthikeyan.s@hyperverge.co
+- product: apac-face (Global Face)
+  L1: tanay.t@hyperverge.co
+  L2: bhargav@hyperverge.co
   L3: sai@hyperverge.co
 - product: ckyc (CKYC)
   L1: murchana.adhikary@hyperverge.co
   L2: bhargav@hyperverge.co
   L3: sai@hyperverge.co
-- product: karza-kyc-wrapper (Ind-Verify DB Check)
-  L1: sanskar.s@hyperverge.co
-  L2: anand.b@hyperverge.co
-  L3: sai@hyperverge.co
-- product: karza-kyc-wrapper (Digilocker)
-  L1: harish.kumar@hyperverge.co
-  L2: sanskar.s@hyperverge.co
-  L3: sai@hyperverge.co
 - product: FRaaS (FRaaS)
   L1: tanay.t@hyperverge.co
   L2: bhargav@hyperverge.co
   L3: sai@hyperverge.co
-- product: india-offline-aadhaar-apis (Aadhaar Scrapper)
-  L1: sanskar.s@hyperverge.co
-  L2: anand.b@hyperverge.co
+- product: GQC IND (gqc-ap-south-1)
+  L1: navya@hyperverge.co
+  L3: bhargav@hyperverge.co
+- product: GQC SGP (gqc-ap-southeast-1)
+  L1: navya@hyperverge.co
+  L2: bhargav@hyperverge.co
   L3: sanchit@hyperverge.co
-- product: '*-hyperturing (HyperTuring)'
+- product: gfc (GFC)
+  L1: ashish.aryan@hyperverge.co
+  L2: bhargav@hyperverge.co
+- product: 'hyperturing (HyperTuring)'
   L1: anand.b@hyperverge.co
-  L2: bhargav@hyperverge.co
-  L3: sai@hyperverge.co
-- product: ind.faceid (Global Face)
-  L1: tanay.t@hyperverge.co
-  L2: bhargav@hyperverge.co
-  L3: sai@hyperverge.co
-- product: apac-face (Global Face)
-  L1: tanay.t@hyperverge.co
-  L2: bhargav@hyperverge.co
-  L3: sai@hyperverge.co
-- product: zaf-face (Global Face)
-  L1: tanay.t@hyperverge.co
   L2: bhargav@hyperverge.co
   L3: sai@hyperverge.co
 - product: idn-face (Global Face)
   L1: tanay.t@hyperverge.co
   L2: bhargav@hyperverge.co
   L3: sai@hyperverge.co
+- product: ind.faceid (Global Face)
+  L1: tanay.t@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co
+- product: india-kyc (India OCR)
+  L1: sanskar.s@hyperverge.co
+  L2: anand.b@hyperverge.co
+  L3: sai@hyperverge.co
+- product: india-offline-aadhaar-apis (Aadhaar Scrapper)
+  L1: sanskar.s@hyperverge.co
+  L2: anand.b@hyperverge.co
+  L3: sanchit@hyperverge.co
+- product: karza-kyc-wrapper (Digilocker)
+  L1: harish.kumar@hyperverge.co
+  L2: sanskar.s@hyperverge.co
+  L3: sai@hyperverge.co
+- product: karza-kyc-wrapper (Ind-Verify DB Check)
+  L1: sanskar.s@hyperverge.co
+  L2: anand.b@hyperverge.co
+  L3: sai@hyperverge.co
+- product: malaysia-kyc (MY OCR)
+  L1: navya@hyperverge.co
+  L3: bhargav@hyperverge.co
 - product: testproduct
   L1: karthikeyan.s@hyperverge.co
   L2: vishwa.j@hyperverge.co
   L3: karthikeyan.s@hyperverge.co
+- product: vietnam-kyc (VN OCR)
+  L1: navya@hyperverge.co
+  L3: bhargav@hyperverge.co
+- product: zaf-face (Global Face)
+  L1: tanay.t@hyperverge.co
+  L2: bhargav@hyperverge.co
+  L3: sai@hyperverge.co
