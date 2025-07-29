@@ -55,10 +55,6 @@
 - product: malaysia-kyc (MY OCR)
   L1: navya@hyperverge.co
   L3: bhargav@hyperverge.co
-- product: testproduct
-  L1: karthikeyan.s@hyperverge.co
-  L2: vishwa.j@hyperverge.co
-  L3: karthikeyan.s@hyperverge.co
 - product: vietnam-kyc (VN OCR)
   L1: navya@hyperverge.co
   L3: bhargav@hyperverge.co
@@ -66,3 +62,8 @@
   L1: tanay.t@hyperverge.co
   L2: bhargav@hyperverge.co
   L3: sai@hyperverge.co
+- product: gkyc (GKYC & LinkKYC & Results API)
+  L1: saifullah.n@hyperverge.co
+  L2: navya@hyperverge.co
+  L3: bhargav@hyperverge.co
+- product: others
