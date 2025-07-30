@@ -7,7 +7,7 @@ TICKET_CSV = "tickets.csv"
 
 FIELDNAMES = [
     "id","title","description","raised_by","raiser_id","raised_by_email","raised_at","client_name","client_app_id","criticality","product","endpoint","assigned_to","assignee_id","assignee_email","frt_hours","message_ts",
-    "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id", "priority", "summary", "fix", "issue", "labels", "l0_testing", "slack_message_link"
+    "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id", "priority", "summary", "fix", "issue", "labels", "l0_testing", "slack_message_link", "kibana_link"
 ]
 
 def save_ticket(ticket: dict):

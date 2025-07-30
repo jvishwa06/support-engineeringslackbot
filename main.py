@@ -32,7 +32,6 @@ FRT_THRESHOLDS = {
     "Low": float(os.getenv("FRT_HOURS_LOW"))
 }
 FRT_ESCALATION_HOURS = float(os.getenv("FRT_ESCALATION_HOURS"))
-
 JIRA_URL = os.getenv("JIRA_URL")
 JIRA_USER = os.getenv("JIRA_USER")
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")
@@ -69,6 +68,13 @@ def clean_endpoint(endpoint):
     endpoint = re.sub(r':[a-zA-Z0-9_+-]+:', '', endpoint)
     return endpoint.strip()
 
+def is_valid_curl_command(cmd):
+    cmd = cmd.strip()
+    if not cmd.lower().startswith("curl "):
+        return False
+    url_pattern = r"https?://[\w\.-]+(:\d+)?(/[\w\.-]*)*"
+    return bool(re.search(url_pattern, cmd))
+
 def get_jira_account_id_by_email(jira_client, email):
     try:
         users = jira_client.search_users(query=email)
@@ -84,6 +90,56 @@ def get_jira_account_id_by_email(jira_client, email):
     except Exception as e:
         logging.error(f"Error fetching Jira user for email {email}: {e}")
     return None
+
+def get_slack_user_by_email(email):
+    try:
+        resp = web_client.users_lookupByEmail(email=email)
+        user = resp.get("user", {})
+        user_id = user.get("id", "")
+        display_name = user.get("real_name") or user.get("profile", {}).get("display_name") or email
+        return user_id, display_name
+    except Exception as e:
+        logging.error(f"Error looking up Slack user for email {email}: {e}")
+        return "", email
+
+def send_fr_reminder(ticket):
+    if ticket.get('frt_hours'):
+        logging.info(f"FRT already set for ticket #{ticket['id']}, skipping FRT reminder.")
+        return
+    try:
+        reminder_text = (f"⏰ <@{ticket['assignee_id']}>, please take a look and respond as soon as possible.")
+        web_client.chat_postMessage(channel=CHANNEL,thread_ts=ticket['message_ts'],text=reminder_text)
+        logging.info(f"Reminder sent for ticket #{ticket['id']} to <@{ticket['assignee_id']}>.")
+    except Exception as e:
+        logging.error(f"Error sending FRT reminder: {e}")
+
+def send_escalation_reminder(ticket):
+    if ticket.get('frt_hours'):
+        logging.info(f"FRT already set for ticket #{ticket['id']}, skipping escalation reminder.")
+        return
+    try:
+        if not ticket.get("frt_hours"):
+            product = ticket["product"]
+            assignee_email = ticket.get("assignee_email")
+            escalation_emails = get_escalation_members(product)
+            if assignee_email in escalation_emails:
+                idx = escalation_emails.index(assignee_email)
+                if idx+1 < len(escalation_emails):
+                    next_level_email = escalation_emails[idx+1]
+                    user_id, display_name = get_slack_user_by_email(next_level_email)
+                    if user_id:
+                        reminder_text = f"\U0001F6A8 <@{user_id}>, kindly check this matter. No response received so far."
+                    else:
+                        reminder_text = f"\U0001F6A8 @{display_name}, kindly check this matter. No response received so far."
+                    web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=reminder_text)
+                    logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to {display_name}.")
+                else:
+                    logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
+            else:
+                logging.info(f"Assignee {assignee_email} not found in escalation list for product {product}.")
+    except Exception as e:
+        logging.error(f"Error sending escalation reminder: {e}")
+        return
 
 def create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter_email=None):
     if not all([JIRA_URL, JIRA_USER, JIRA_TOKEN, JIRA_PROJECT_KEY]):
@@ -165,6 +221,7 @@ def post_ticket_message(ticket):
         f"*Client App ID*: {ticket['client_app_id']}\n\n"
         f"*Product*: {ticket['product']}\n\n"
         f"*Curl Command*: {ticket['endpoint']}\n\n"
+        f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
         f"*Criticality*: {ticket['criticality']}\n\n"
         f"*L0 Testing Done*: {ticket.get('l0_testing', '')}\n\n"
         f"*Assigned To*: <@{ticket['assignee_id']}>\n\n"
@@ -199,7 +256,6 @@ def post_ticket_message(ticket):
         logging.info(f"Ticket #{ticket['id']} posted to Slack with ts={result.get('ts')}")
         ticket['message_ts'] = result.get('ts')
 
-        # Store Slack message link in the ticket for CSV
         ticket['slack_message_link'] = f"https://slack.com/app_redirect?channel={CHANNEL}&message_ts={ticket['message_ts']}"
 
         frt_value = FRT_THRESHOLDS.get(ticket['criticality'], '')
@@ -224,62 +280,6 @@ def post_ticket_message(ticket):
         logging.error(f"Error posting message to Slack: {e}")
         return None
 
-def send_fr_reminder(ticket):
-    if ticket.get('frt_hours'):
-        logging.info(f"FRT already set for ticket #{ticket['id']}, skipping FRT reminder.")
-        return
-    try:
-        reminder_text = (f"⏰ <@{ticket['assignee_id']}>, please take a look and respond as soon as possible.")
-        web_client.chat_postMessage(channel=CHANNEL,thread_ts=ticket['message_ts'],text=reminder_text)
-        logging.info(f"Reminder sent for ticket #{ticket['id']} to <@{ticket['assignee_id']}>.")
-    except Exception as e:
-        logging.error(f"Error sending FRT reminder: {e}")
-        
-def get_slack_user_by_email(email):
-    try:
-        resp = web_client.users_lookupByEmail(email=email)
-        user = resp.get("user", {})
-        user_id = user.get("id", "")
-        display_name = user.get("real_name") or user.get("profile", {}).get("display_name") or email
-        return user_id, display_name
-    except Exception as e:
-        logging.error(f"Error looking up Slack user for email {email}: {e}")
-        return "", email
-    
-def is_valid_curl_command(cmd):
-    cmd = cmd.strip()
-    if not cmd.lower().startswith("curl "):
-        return False
-    url_pattern = r"https?://[\w\.-]+(:\d+)?(/[\w\.-]*)*"
-    return bool(re.search(url_pattern, cmd))
-
-def send_escalation_reminder(ticket):
-    if ticket.get('frt_hours'):
-        logging.info(f"FRT already set for ticket #{ticket['id']}, skipping escalation reminder.")
-        return
-    try:
-        if not ticket.get("frt_hours"):
-            product = ticket["product"]
-            assignee_email = ticket.get("assignee_email")
-            escalation_emails = get_escalation_members(product)
-            if assignee_email in escalation_emails:
-                idx = escalation_emails.index(assignee_email)
-                if idx+1 < len(escalation_emails):
-                    next_level_email = escalation_emails[idx+1]
-                    user_id, display_name = get_slack_user_by_email(next_level_email)
-                    if user_id:
-                        reminder_text = f"\U0001F6A8 <@{user_id}>, kindly check this matter. No response received so far."
-                    else:
-                        reminder_text = f"\U0001F6A8 @{display_name}, kindly check this matter. No response received so far."
-                    web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=reminder_text)
-                    logging.info(f"Escalation reminder sent for ticket #{ticket['id']} to {display_name}.")
-                else:
-                    logging.info(f"No higher escalation level found for ticket #{ticket['id']}.")
-            else:
-                logging.info(f"Assignee {assignee_email} not found in escalation list for product {product}.")
-    except Exception as e:
-        logging.error(f"Error sending escalation reminder: {e}")
-        return
 
 @socket_client.socket_mode_request_listeners.append
 def handle_events(client: SocketModeClient, req: SocketModeRequest):
@@ -326,6 +326,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     {"type": "input", "block_id": "client_app_id", "label": {"type": "plain_text", "text": "Client App ID"}, "element": {"type": "plain_text_input", "action_id": "value"}},
                     {"type": "input", "block_id": "product", "label": {"type": "plain_text", "text": "Product"}, "element": {"type": "static_select", "action_id": "value", "options": product_options}},
                     {"type": "input", "block_id": "endpoint", "label": {"type": "plain_text", "text": "Curl Command"}, "element": {"type": "rich_text_input", "action_id": "value"}, "optional": True},
+                    {"type": "input", "block_id": "kibana_link", "label": {"type": "plain_text", "text": "Kibana Link"}, "element": {"type": "plain_text_input", "action_id": "value"}, "optional": True},
                     {"type": "input", "block_id": "assignee", "label": {"type": "plain_text", "text": "Assign To"}, "element": {"type": "users_select", "action_id": "value"}},
                     {
                         "type": "input",
@@ -441,8 +442,18 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
         description = extract_plain_text_from_rich_text(description_raw)
 
         ticket = {}
+        kibana_link_value = ""
+        try:
+            kibana_link_block = state["kibana_link"]["value"]
+            if "value" in kibana_link_block:
+                kibana_link_value = kibana_link_block["value"]
+            else:
+                kibana_link_value = ""
+        except Exception:
+            kibana_link_value = ""
+
         for field in [
-            "id","title","description","raised_by","raiser_id","raised_by_email","raised_at","client_name","client_app_id","criticality","product","endpoint","assigned_to","assignee_id","assignee_email","frt_hours","message_ts",
+            "id","title","description","raised_by","raiser_id","raised_by_email","raised_at","client_name","client_app_id","criticality","product","endpoint","kibana_link","assigned_to","assignee_id","assignee_email","frt_hours","message_ts",
             "ttt_hours","triaged_by","triaged_id","triage_ts","ttr_hours","resolved_by","resolver_id","resolve_at","escalate_to","escalate_id", "priority", "summary", "fix", "issue", "labels", "l0_testing"
         ]:
             if field == "id":
@@ -469,6 +480,8 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                 ticket[field] = state["product"]["value"]["selected_option"]["value"]
             elif field == "endpoint":
                 ticket[field] = endpoint
+            elif field == "kibana_link":
+                ticket[field] = kibana_link_value
             elif field == "assigned_to":
                 ticket[field] = assigned_to_name
             elif field == "assignee_id":
@@ -532,6 +545,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Client App ID*: {ticket['client_app_id']}\n\n"
                             f"*Product*: {ticket['product']}\n\n"
                             f"*Curl Command*: {ticket['endpoint']}\n\n"
+                            f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
                             f"*Criticality*: {ticket['criticality']}\n\n"
                             f"*L0 Testing Done*: {ticket.get('l0_testing', '')}\n\n"
                             f"*Assigned To*: <@{ticket['assignee_id']}>\n\n"
@@ -559,6 +573,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Client App ID*: {ticket['client_app_id']}\n\n"
                             f"*Product*: {ticket['product']}\n\n"
                             f"*Curl Command*: {ticket['endpoint']}\n\n"
+                            f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
                             f"*Criticality*: {ticket['criticality']}\n\n"
                             f"*L0 Testing Done*: {ticket.get('l0_testing', '')}\n\n"
                             f"*Assigned To*: <@{ticket['assignee_id']}>\n\n"
@@ -580,6 +595,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Client App ID*: {ticket['client_app_id']}\n\n"
                                 f"*Product*: {ticket['product']}\n\n"
                                 f"*Curl Command*: {ticket['endpoint']}\n\n"
+                                f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
                                 f"*Criticality*: {ticket['criticality']}\n\n"
                                 f"*L0 Testing Done*: {ticket.get('l0_testing', '')}\n\n"
                                 f"*Assigned To*: <@{ticket['assignee_id']}>\n\n"
@@ -784,6 +800,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         f"*Client App ID*: {ticket['client_app_id']}\n\n"
                         f"*Product*: {ticket['product']}\n\n"
                         f"*Curl Command*: {ticket['endpoint']}\n\n"
+                        f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
                         f"*Criticality*: {ticket['criticality']}\n\n"
                         f"*L0 Testing Done:* {ticket.get('l0_testing', '')}\n\n"
                         f"*Assigned To*: <@{escalate_to_id}>\n\n"
@@ -806,6 +823,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         f"*Client App ID*: {ticket['client_app_id']}\n\n"
                         f"*Product*: {ticket['product']}\n\n"
                         f"*Curl Command*: {ticket['endpoint']}\n\n"
+                        f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
                         f"*Criticality*: {ticket['criticality']}\n\n"
                         f"*L0 Testing Done*: {ticket.get('l0_testing', '')}\n\n"
                         f"*Assigned To*: <@{escalate_to_id}>\n\n"
@@ -944,6 +962,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         f"*Client App ID*: {ticket['client_app_id']}\n\n"
                         f"*Product*: {ticket['product']}\n\n"
                         f"*Curl Command*: {ticket['endpoint']}\n\n"
+                        f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
                         f"*Criticality*: {ticket['criticality']}\n\n"
                         f"*L0 Testing Done*: {ticket.get('l0_testing', '')}\n\n"
                         f"*Assigned To*: <@{ticket['assignee_id']}>\n\n"
@@ -967,6 +986,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             f"*Client App ID*: {ticket['client_app_id']}\n\n"
                             f"*Product*: {ticket['product']}\n\n"
                             f"*Curl Command*: {ticket['endpoint']}\n\n"
+                            f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
                             f"*Criticality*: {ticket['criticality']}\n\n"
                             f"*L0 Testing Done*: {ticket.get('l0_testing', '')}\n\n"
                             f"*Assigned To*: <@{ticket['assignee_id']}>\n\n"
@@ -998,11 +1018,13 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                     f"*Client App ID*: {ticket['client_app_id']}\n"
                     f"*Product*: {ticket['product']}\n"
                     f"*Curl Command*: {ticket['endpoint']}\n"
+                    f"*Kibana Link*: {ticket.get('kibana_link', '')}\n\n"
                     f"*Criticality*: {ticket['criticality']}\n"
                     f"*L0 Testing Done*: {ticket.get('l0_testing', '')}\n\n"
                     f"*Assigned To*: <@{ticket.get('assignee_id', '')}>\n"
                     f"*Raised By*: <@{ticket.get('raiser_id', '')}>\n"
                     f"*Raised At*: {formatted_raised_at}\n"
+                    f"*Slack Message*: {ticket.get('slack_message_link', '')}\n"
                     f"*Resolved By*: <@{user_id}>\n"
                     f"*Resolved At*: {ticket.get('resolve_at', '')}\n"
                     f"{'_' * 80}\n"
