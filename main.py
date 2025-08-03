@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 PORT = int(os.getenv("PORT"))
-CHANNEL = os.getenv("PRODCHANNEL")
+CHANNEL = os.getenv("DEVCHANNEL")
 SUMMARY_CHANNEL = os.getenv("SUMMARY_CHANNEL")
 FRT_THRESHOLDS = {
     "Critical": float(os.getenv("FRT_HOURS_CRITICAL")),
@@ -159,14 +159,16 @@ def create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter
         slack_message_link = f"https://slack.com/app_redirect?channel={CHANNEL}&message_ts={ticket.get('message_ts', '')}"
         endpoint_raw = ticket.get('endpoint', '')
         endpoint_clean = clean_endpoint(endpoint_raw)
+        kibana_link = ticket.get('kibana_link', '')
         jira_description = (
-        f"*Issue*: {issue}\n"
-        f"*Fix*: {fix}\n"
-        f"*Client Name*: {ticket.get('client_name', '')}\n"
-        f"*Client App ID*: {ticket.get('client_app_id', '')}\n"
-        f"*Product*: {ticket.get('product', '')}\n"
-        f"*Endpoint*: {endpoint_clean}\n"
-        f"*Slack Message*: {slack_message_link}"
+            f"*Issue*: {issue}\n"
+            f"*Fix*: {fix}\n"
+            f"*Client Name*: {ticket.get('client_name', '')}\n"
+            f"*Client App ID*: {ticket.get('client_app_id', '')}\n"
+            f"*Product*: {ticket.get('product', '')}\n"
+            f"*Endpoint*: {endpoint_clean}\n"
+            f"*Kibana Link*: {kibana_link}\n"
+            f"Issue created in Slack from a <{slack_message_link}|message>."
         )
         labels = ticket.get('labels', [])
         if isinstance(labels, str):
@@ -195,7 +197,9 @@ def create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter
             "description": jira_description,
             "issuetype": {"name": "Task"},
             "priority": {"name": priority},
-            "labels": labels
+            "labels": labels,
+            "components": [{"name": "DKYC Hub Engineering"}],
+            "customfield_10168": [{"value": "Low"}]
         }
         if resolved:
             issue_dict["duedate"] = resolved
@@ -204,7 +208,16 @@ def create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter
         if reporter_account_id:
             issue_dict["reporter"] = {"accountId": reporter_account_id}
         issue = jira_client.create_issue(fields=issue_dict)
-        logging.info(f"Issue created: {issue.key}")
+        try:
+            backlog_url = f"{JIRA_URL}/rest/agile/1.0/backlog/issue"
+            payload = {"issues": [issue.key]}
+            response = jira_client._session.post(backlog_url, json=payload)
+            if response.status_code == 204:
+                logging.info(f"Added issue {issue.key} to backlog.")
+            else:
+                logging.warning(f"Could not add issue {issue.key} to backlog: {response.status_code} {response.text}")
+        except Exception as e:
+            logging.error(f"Error adding issue {issue.key} to backlog: {e}")
         return issue.key
     except Exception as e:
         logging.error(f"Failed to create Jira ticket: {e}")
@@ -260,8 +273,13 @@ def post_ticket_message(ticket):
 
         frt_value = FRT_THRESHOLDS.get(ticket['criticality'], '')
         if frt_value:
-            frt_text = f"FRT for the {ticket['criticality']} is {frt_value} hrs 🟡⏳"
+            frt_text = f"FRT (First Response Time) for *{ticket['criticality']}* priority is *{frt_value} hours* ⏳. " \
+                    f"This is the maximum time allowed to respond to this ticket as per SLA."
             web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=frt_text)
+            
+            if ticket.get('frt_hours'):
+                triage_explanation = "The Triage feature allows team members to categorize this ticket, add details about the issue/fix, set priority, and assign it to the appropriate person and create jira ticket."
+                web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=triage_explanation)
 
         if not ticket.get('frt_hours'):
             frt_hours = FRT_THRESHOLDS[ticket['criticality']]
@@ -603,6 +621,10 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 f"*Raised At*: {ticket['raised_at']}\n"
                             )
                         )
+                        
+                        # Send triage explanation message
+                        triage_explanation = "📋 The *Triage* button allows team members to categorize this ticket, add details about the issue/fix, set priority, and assign it to the appropriate person."
+                        client.web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=triage_explanation)
                         return
                     else:
                         logging.info(f"User {responder_email} ({responder_name}) is not an escalation member or assignee for ticket #{ticket['id']}. FRT will not be set.")
