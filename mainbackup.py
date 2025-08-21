@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 PORT = int(os.getenv("PORT"))
-CHANNEL = os.getenv("DEVCHANNEL")
+CHANNEL = os.getenv("PRODCHANNEL")
 SUMMARY_CHANNEL = os.getenv("SUMMARY_CHANNEL")
 FRT_THRESHOLDS = {
     "Critical": float(os.getenv("FRT_HOURS_CRITICAL")),
@@ -43,15 +43,10 @@ JIRA_URL = os.getenv("JIRA_URL")
 JIRA_USER = os.getenv("JIRA_USER")
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")
 JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY")
+
 BUSINESS_START_HOUR = 9  # 9 AM
 BUSINESS_END_HOUR = 19   # 7 PM
 BUSINESS_DAYS = [0, 1, 2, 3, 4]  # Monday=0 to Friday=4
-
-app = FastAPI()
-web_client = WebClient(token=BOT_TOKEN)
-socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
-scheduler = BackgroundScheduler()
-scheduler.start()
 
 def is_business_hours(dt):
     if dt.weekday() not in BUSINESS_DAYS:
@@ -132,6 +127,12 @@ def calculate_business_hours_reminder_time(start_dt, total_hours, criticality):
     else:
         next_business_start = get_next_business_hour(start_dt)
         return add_business_hours(next_business_start, total_hours)
+
+app = FastAPI()
+web_client = WebClient(token=BOT_TOKEN)
+socket_client = SocketModeClient(app_token=APP_TOKEN, web_client=web_client)
+scheduler = BackgroundScheduler()
+scheduler.start()
 
 jira_labels = []
 def fetch_jira_labels():
@@ -305,7 +306,7 @@ def create_jira_ticket(summary, issue, fix, priority, resolved, ticket, reporter
             "components": [{"name": "DKYC Hub Engineering"}],
             "customfield_10168": [{"value": "Low"}]
         }
-        if resolved: 
+        if resolved:
             issue_dict["duedate"] = resolved
         if assignee_account_id:
             issue_dict["assignee"] = {"accountId": assignee_account_id}
@@ -515,57 +516,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                     text += f":{el.get('name', '')}:"
                                 elif el.get('type') == 'link':
                                     url = el.get('url', '')
-                                    link_text = el.get('text', url)
-                                    if link_text and link_text != url:
-                                        text += f"<{url}|{link_text}>"
-                                    else:
-                                        text += f"<{url}>"
-                                elif el.get('type') == 'user':
-                                    text += f"<@{el.get('user_id', '')}>"
-                                elif el.get('type') == 'channel':
-                                    text += f"<#{el.get('channel_id', '')}>"
-                        elif section.get('type') == 'rich_text_preformatted':
-                            text += '\n```\n'
-                            for el in section.get('elements', []):
-                                if el.get('type') == 'text':
-                                    text += el.get('text', '')
-                                elif el.get('type') == 'link':
-                                    url = el.get('url', '')
-                                    link_text = el.get('text', url)
-                                    if link_text and link_text != url:
-                                        text += f"<{url}|{link_text}>"
-                                    else:
-                                        text += f"<{url}>"
-                            text += '\n```\n'
-                        elif section.get('type') == 'rich_text_quote':
-                            text += '\n> '
-                            for el in section.get('elements', []):
-                                if el.get('type') == 'text':
-                                    text += el.get('text', '')
-                                elif el.get('type') == 'link':
-                                    url = el.get('url', '')
-                                    link_text = el.get('text', url)
-                                    if link_text and link_text != url:
-                                        text += f"<{url}|{link_text}>"
-                                    else:
-                                        text += f"<{url}>"
-                            text += '\n'
-                        elif section.get('type') == 'rich_text_list':
-                            text += '\n'
-                            for item in section.get('elements', []):
-                                if item.get('type') == 'rich_text_section':
-                                    text += '• '
-                                    for el in item.get('elements', []):
-                                        if el.get('type') == 'text':
-                                            text += el.get('text', '')
-                                        elif el.get('type') == 'link':
-                                            url = el.get('url', '')
-                                            link_text = el.get('text', url)
-                                            if link_text and link_text != url:
-                                                text += f"<{url}|{link_text}>"
-                                            else:
-                                                text += f"<{url}>"
-                                    text += '\n'
+                                    text += url
                         elif section.get('type') == 'text':
                             text += section.get('text', '')
                     return text
@@ -627,57 +578,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 text += f":{el.get('name', '')}:"
                             elif el.get('type') == 'link':
                                 url = el.get('url', '')
-                                link_text = el.get('text', url)
-                                if link_text and link_text != url:
-                                    text += f"<{url}|{link_text}>"
-                                else:
-                                    text += f"<{url}>"
-                            elif el.get('type') == 'user':
-                                text += f"<@{el.get('user_id', '')}>"
-                            elif el.get('type') == 'channel':
-                                text += f"<#{el.get('channel_id', '')}>"
-                    elif section.get('type') == 'rich_text_preformatted':
-                        text += '\n```\n'
-                        for el in section.get('elements', []):
-                            if el.get('type') == 'text':
-                                text += el.get('text', '')
-                            elif el.get('type') == 'link':
-                                url = el.get('url', '')
-                                link_text = el.get('text', url)
-                                if link_text and link_text != url:
-                                    text += f"<{url}|{link_text}>"
-                                else:
-                                    text += f"<{url}>"
-                        text += '\n```\n'
-                    elif section.get('type') == 'rich_text_quote':
-                        text += '\n> '
-                        for el in section.get('elements', []):
-                            if el.get('type') == 'text':
-                                text += el.get('text', '')
-                            elif el.get('type') == 'link':
-                                url = el.get('url', '')
-                                link_text = el.get('text', url)
-                                if link_text and link_text != url:
-                                    text += f"<{url}|{link_text}>"
-                                else:
-                                    text += f"<{url}>"
-                        text += '\n'
-                    elif section.get('type') == 'rich_text_list':
-                        text += '\n'
-                        for item in section.get('elements', []):
-                            if item.get('type') == 'rich_text_section':
-                                text += '• '
-                                for el in item.get('elements', []):
-                                    if el.get('type') == 'text':
-                                        text += el.get('text', '')
-                                    elif el.get('type') == 'link':
-                                        url = el.get('url', '')
-                                        link_text = el.get('text', url)
-                                        if link_text and link_text != url:
-                                            text += f"<{url}|{link_text}>"
-                                        else:
-                                            text += f"<{url}>"
-                                text += '\n'
+                                text += url
                     elif section.get('type') == 'text':
                         text += section.get('text', '')
                 return text
@@ -847,6 +748,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                             )
                         )
                         
+                        # Send triage explanation first, then TTT
                         triage_explanation = "📋 The *Triage* button allows team members to categorize this ticket, add details about the issue/fix, set priority, and assign it to the appropriate person."
                         client.web_client.chat_postMessage(channel=CHANNEL, thread_ts=ticket['message_ts'], text=triage_explanation)
                         
@@ -927,57 +829,7 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                                 text += f":{el.get('name', '')}:"
                             elif el.get('type') == 'link':
                                 url = el.get('url', '')
-                                link_text = el.get('text', url)
-                                if link_text and link_text != url:
-                                    text += f"<{url}|{link_text}>"
-                                else:
-                                    text += f"<{url}>"
-                            elif el.get('type') == 'user':
-                                text += f"<@{el.get('user_id', '')}>"
-                            elif el.get('type') == 'channel':
-                                text += f"<#{el.get('channel_id', '')}>"
-                    elif section.get('type') == 'rich_text_preformatted':
-                        text += '\n```\n'
-                        for el in section.get('elements', []):
-                            if el.get('type') == 'text':
-                                text += el.get('text', '')
-                            elif el.get('type') == 'link':
-                                url = el.get('url', '')
-                                link_text = el.get('text', url)
-                                if link_text and link_text != url:
-                                    text += f"<{url}|{link_text}>"
-                                else:
-                                    text += f"<{url}>"
-                        text += '\n```\n'
-                    elif section.get('type') == 'rich_text_quote':
-                        text += '\n> '
-                        for el in section.get('elements', []):
-                            if el.get('type') == 'text':
-                                text += el.get('text', '')
-                            elif el.get('type') == 'link':
-                                url = el.get('url', '')
-                                link_text = el.get('text', url)
-                                if link_text and link_text != url:
-                                    text += f"<{url}|{link_text}>"
-                                else:
-                                    text += f"<{url}>"
-                        text += '\n'
-                    elif section.get('type') == 'rich_text_list':
-                        text += '\n'
-                        for item in section.get('elements', []):
-                            if item.get('type') == 'rich_text_section':
-                                text += '• '
-                                for el in item.get('elements', []):
-                                    if el.get('type') == 'text':
-                                        text += el.get('text', '')
-                                    elif el.get('type') == 'link':
-                                        url = el.get('url', '')
-                                        link_text = el.get('text', url)
-                                        if link_text and link_text != url:
-                                            text += f"<{url}|{link_text}>"
-                                        else:
-                                            text += f"<{url}>"
-                                text += '\n'
+                                text += url
                     elif section.get('type') == 'text':
                         text += section.get('text', '')
                 return text
@@ -1047,7 +899,6 @@ def handle_events(client: SocketModeClient, req: SocketModeRequest):
                         except Exception as e:
                             logging.error(f"Error fetching escalate_to name/email: {e}")
                             escalate_to_name = escalate_to
-                            escalate_to_email = ""
                             escalate_to_email = ""
                     update_dict = {
                         "ttt_hours": f"{ttt_hours:.2f}",
